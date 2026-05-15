@@ -36,15 +36,16 @@ export function App() {
   const s = manifest.schema;
 
   return (
-    <div className="app">
+    <div className={"app" + (mode === "inspect" ? " inspect" : "")}>
       <header className="topbar">
         <div className="brand">
-          MAY<b>·</b>viewer
+          <span className="w">May</span>
+          <span className="t">· Viewer</span>
         </div>
         <div className="sep" />
-        <div className="world-name mono">{manifest.source.name}</div>
+        <div className="file mono">{manifest.source.name}</div>
 
-        <div className="modes" style={{ marginLeft: 28 }}>
+        <div className="modes">
           <button className={mode === "map" ? "on" : ""} onClick={() => setMode("map")}>
             Map
           </button>
@@ -53,35 +54,31 @@ export function App() {
           </button>
         </div>
 
-        <div className="counts">
-          <div className="stat">
-            <span className="v mono">{compact(s.num_people)}</span>
-            <span className="k eyebrow">people</span>
+        <div className="kpis">
+          <div className="kpi">
+            <div className="v">{compact(s.num_people)}</div>
+            <div className="k">People</div>
           </div>
-          <div className="stat">
-            <span className="v mono">{compact(s.num_venues)}</span>
-            <span className="k eyebrow">venues</span>
+          <div className="kpi">
+            <div className="v">{compact(s.num_venues)}</div>
+            <div className="k">Venues</div>
           </div>
-          <div className="stat">
-            <span className="v mono">{compact(s.num_geo_units)}</span>
-            <span className="k eyebrow">geo units</span>
+          <div className="kpi">
+            <div className="v">{compact(s.num_geo_units)}</div>
+            <div className="k">Geo units</div>
           </div>
         </div>
       </header>
 
-      <div className="body">
-        <aside className="rail">
+      {mode === "map" ? (
+        <>
           <GeoTree />
-        </aside>
-
-        <main className="stage">
           <MapView />
-        </main>
-
-        <aside className="rail right">
-          {mode === "map" ? <StatsPanel /> : <Inspector />}
-        </aside>
-      </div>
+          <StatsPanel />
+        </>
+      ) : (
+        <Inspector />
+      )}
     </div>
   );
 }

@@ -46,8 +46,14 @@ interface State {
   /** Breadcrumb from the coarsest root down to the selected unit. */
   path: NavNode[];
   selected: NavNode | null;
-  // Inspector selections
-  inspectVenueId: number | null;
+  // Inspector selections.
+  // Venue navigation is category → list → detail with nested children:
+  //   venueType === null            → show venue-type categories
+  //   venueType set, venuePath []   → show root venues of that type
+  //   venuePath = [id, …]           → detail of the last id; each id is a
+  //                                   venue opened from its parent's detail
+  venueType: string | null;
+  venuePath: number[];
   inspectPersonId: number | null;
 
   init: () => Promise<void>;
@@ -63,7 +69,12 @@ interface State {
    *  full ancestor breadcrumb via parent_id. Fixes the no-geo_id gap. */
   drillToGeo: (geoId: number, level: number) => Promise<void>;
   drillUpTo: (index: number) => void;
-  inspectVenue: (id: number | null) => void;
+  /** Pick a venue-type category (null returns to the category list). */
+  setVenueType: (type: string | null) => void;
+  /** Drill into a venue (push onto the nested-venue breadcrumb). */
+  openVenue: (id: number) => void;
+  /** Truncate the venue breadcrumb to `depth` venues (0 = type's list). */
+  venueBackTo: (depth: number) => void;
   inspectPerson: (id: number | null) => void;
 }
 
@@ -79,7 +90,8 @@ export const useStore = create<State>((set, get) => ({
   levelCache: new Map(),
   path: [],
   selected: null,
-  inspectVenueId: null,
+  venueType: null,
+  venuePath: [],
   inspectPersonId: null,
 
   init: async () => {
@@ -151,7 +163,7 @@ export const useStore = create<State>((set, get) => ({
     set((s) => {
       // Replace the tail of the path at this node's level.
       const trimmed = s.path.filter((n) => n.level < node.level);
-      return { path: [...trimmed, node], selected: node, inspectVenueId: null, inspectPersonId: null };
+      return { path: [...trimmed, node], selected: node, venueType: null, venuePath: [], inspectPersonId: null };
     });
   },
 
@@ -177,16 +189,20 @@ export const useStore = create<State>((set, get) => ({
       chain.unshift(n);
       pid = (await ensureLevel(levels[i].value)).byId.get(n.geo_id)?.parent_id;
     }
-    set({ path: chain, selected: target, inspectVenueId: null, inspectPersonId: null });
+    set({ path: chain, selected: target, venueType: null, venuePath: [], inspectPersonId: null });
   },
 
   drillUpTo: (index) => {
     const s = get();
     const path = s.path.slice(0, index + 1);
-    set({ path, selected: path[path.length - 1] ?? null, inspectVenueId: null, inspectPersonId: null });
+    set({ path, selected: path[path.length - 1] ?? null, venueType: null, venuePath: [], inspectPersonId: null });
   },
 
-  inspectVenue: (id) => set({ inspectVenueId: id, inspectPersonId: null }),
+  setVenueType: (type) => set({ venueType: type, venuePath: [], inspectPersonId: null }),
+  openVenue: (id) =>
+    set((s) => ({ venuePath: [...s.venuePath, id], inspectPersonId: null })),
+  venueBackTo: (depth) =>
+    set((s) => ({ venuePath: s.venuePath.slice(0, depth), inspectPersonId: null })),
   inspectPerson: (id) => set({ inspectPersonId: id }),
 }));
 

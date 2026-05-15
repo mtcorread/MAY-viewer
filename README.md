@@ -13,15 +13,6 @@ an England world and a New Zealand world — or a world with no schools — all
 just work. Geographic boundary shapefiles are an optional, country-agnostic
 overlay matched by geo code; the default render needs none.
 
-## Status
-
-| Phase | What | State |
-|---|---|---|
-| 1 | Synthetic scale generator (tile a real world to N agents) | ✅ done |
-| 2 | Streaming prep pipeline (aggregates + tiles + Arrow shards) | ✅ done |
-| 3 | Frontend (map drill-down + entity inspector) | ✅ done |
-| 4 | 60M scale + static-deploy validation | — |
-
 ## Usage
 
 ```bash
@@ -40,24 +31,35 @@ mayviewer prep /path/to/world_state.h5
 mayviewer serve /path/to/world_state.h5
 ```
 
-## Frontend (Phase 3)
+## Frontend
 
 A local-first browser app — React + MapLibre GL + PMTiles — that consumes
-**only** the prep cache, never the `.h5`, through bounded reads:
+**only** the prep cache, never the `.h5`, through bounded reads. The UI is a
+warm-paper, single-typeface (IBM Plex Sans) design with a shared header
+(brand, file, Map/Inspect switch, world KPIs):
 
-- **Map mode** — PMTiles hexbin density backdrop (offline, no external
-  basemap) with a tree-driven geography drill-down (breadcrumb + child list
-  built from the aggregate parquets' `parent_id`/`level`) and a live,
-  schema-labelled stats panel for the selected unit.
-- **Inspect mode** — pick a geo unit → its venues and people via a single
-  O(1) Parquet **row-group** read (manifest `row_groups` index); venue
-  attributes + member roster grouped by subset; person attributes + social
-  graph (friends in the loaded unit are clickable, cross-unit friends shown
-  as IDs).
+- **Map mode** — three panels: a left **Geography** panel (selected-ancestor
+  path, child drill list, leaf-unit explainer, dataset level reference), the
+  map, and a right **Stats** panel (hero population + per-demographic bars,
+  schema-labelled). The map renders real geo-boundary polygons (offline
+  PMTiles, one source-layer per level) as the click-to-drill target with a
+  hexbin density fallback; a floating glass **Layers** card toggles
+  overlay/basemap and a cursor tooltip previews a region's stats. Clicking a
+  region — or returning from Inspect — recentres and fits the map to that
+  unit's extent (from the aggregate `geo:bbox_*`/`geo:lon,lat` columns).
+- **Inspect mode** — a four-column cascade (Categories → venues →
+  sub-units → detail) with a path crumb trail, fed by a single O(1) Parquet
+  **row-group** read (manifest `row_groups` index). The detail column shows
+  a venue summary card + member table; selecting a person opens their
+  attributes and social graph (in-unit friends clickable, cross-unit shown
+  as IDs). People-partitioned leaf units surface a synthetic "People" list.
 
-Every label is rendered from `manifest.json` (`schema`/`geo` blocks and the
-self-describing aggregate columns) — zero hardcoded domain terms. Fonts are
-self-hosted so the app works fully offline.
+An optional online basemap is **opt-in only** via
+`mayviewer serve … --basemap osm|carto-dark|carto-light|<xyz-url>`; with no
+flag the viewer makes zero external requests. Every label is rendered from
+`manifest.json` (`schema`/`geo` blocks and the self-describing aggregate
+columns) — zero hardcoded domain terms. Fonts are self-hosted so the app
+works fully offline.
 
 `mayviewer serve` is the entire backend: a dependency-free, Range-capable
 static server. The exact same cache directory can be dropped onto any static
@@ -73,14 +75,12 @@ For UI iteration, run `mayviewer serve <world>` and `npm run dev` in
 
 ### Known v1 limitations / Phase-4 caveats
 
-- The map is a density backdrop; it does **not** recentre on the selected
-  unit — the cache carries no per-unit centroid (aggregates have no lat/lon).
-  A one-line prep addendum emitting unit lon/lat into the aggregate parquets
-  would later enable map-follow with no frontend rework.
-- The hexbin PMTiles pyramid is sparse (tiles only at zooms 4/7/10/13), so
-  the map is pinned to one representative zoom and overzoomed — a single
-  density resolution. Multi-resolution needs either a contiguous prep
-  pyramid or one MapLibre source per discrete zoom.
+- The hexbin density **fallback** PMTiles pyramid is sparse (tiles only at
+  zooms 4/7/10/13), so when no boundary shapes are baked the map is pinned to
+  one representative zoom and overzoomed — a single density resolution.
+  Multi-resolution needs either a contiguous prep pyramid or one MapLibre
+  source per discrete zoom. (With boundary shapes present the map drills and
+  recentres per level normally.)
 - Cross-unit friend *identity* resolution is deferred (count + in-unit links
   only) — needs a `person_id → row-group` index added in prep.
 - One row group per geo unit makes the Parquet footer grow with unit count:

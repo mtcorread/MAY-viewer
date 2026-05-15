@@ -230,7 +230,15 @@ def write_venues(reader, schema, out_dir: Path) -> tuple[str, dict[int, int]]:
 
 
 def write_members(reader, schema, out_dir: Path) -> tuple[str, dict[int, int]]:
+    # Authoritative per-subset names. ``metadata/names/subsets`` is a parallel
+    # array aligned 1:1 with the subset metadata arrays (same geo-unit sort,
+    # same partition index), holding each subset's real name ("Adults",
+    # "teachers", …). The ``subset_indices`` are positions *within a venue*
+    # (0,1,2…), NOT registry slots, so indexing the global subset_names
+    # registry by them mislabels every subset. Use the names array; fall back
+    # to the registry-by-index only if a world lacks the names dataset.
     snames = schema.subset_names
+    has_names = "metadata/names/subsets" in reader
     sch = pa.schema([
         ("venue_id", pa.int64()),
         ("geo_unit_id", pa.int64()),
@@ -247,16 +255,21 @@ def write_members(reader, schema, out_dir: Path) -> tuple[str, dict[int, int]]:
         s_sub = reader.slice("venues/subsets/subset_indices", s, c)
         s_off = reader.slice("venues/subsets/members_offsets", s, c).astype(np.int64)
         s_cnt = reader.slice("venues/subsets/member_counts", s, c).astype(np.int64)
+        s_name = (reader.slice("metadata/names/subsets", s, c)
+                  if has_names else None)
         mb = members.bounds(gid)
         if mb is None:
             continue
         m_lo, m_n = mb
         blk = reader.slice("venues/subsets/members_flat", m_lo, m_n)
         v_out, g_out, sub_out, p_out = [], [], [], []
-        for vid, si, o, n in zip(s_vid, s_sub, s_off, s_cnt):
+        for k, (vid, si, o, n) in enumerate(zip(s_vid, s_sub, s_off, s_cnt)):
             rel = int(o) - m_lo
             mem = blk[rel:rel + int(n)]
-            label = snames[int(si)] if 0 <= int(si) < len(snames) else str(int(si))
+            if s_name is not None:
+                label = _dec(s_name[k])
+            else:
+                label = snames[int(si)] if 0 <= int(si) < len(snames) else str(int(si))
             v_out.extend([int(vid)] * len(mem))
             g_out.extend([gid] * len(mem))
             sub_out.extend([label] * len(mem))
