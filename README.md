@@ -41,6 +41,7 @@ file, a Map/Inspect switch, and world totals).
 <p align="center">
   <img width="500" height="280" alt="map_view" src="https://github.com/user-attachments/assets/1ecac625-3271-4ee3-bba1-eb89a97eeb71" />
 </p>
+
 - **Inspect mode** — a four-column cascade: pick a venue category, then a
   venue, then a sub-unit, then see its detail. The detail view summarises
   the venue and lists its members; selecting a person opens their
