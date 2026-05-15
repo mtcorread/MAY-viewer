@@ -38,10 +38,17 @@ file, a Map/Inspect switch, and world totals).
   demographic breakdowns for the selected unit. A floating Layers card
   switches the overlay and basemap, and hovering a region previews its
   stats. Selecting a region recentres the map on it.
+<p align="center">
+  <img width="500" height="280" alt="map_view" src="https://github.com/user-attachments/assets/1ecac625-3271-4ee3-bba1-eb89a97eeb71" />
+</p>
 - **Inspect mode** — a four-column cascade: pick a venue category, then a
   venue, then a sub-unit, then see its detail. The detail view summarises
   the venue and lists its members; selecting a person opens their
   attributes and their social graph, with friends in view clickable.
+<p align="center">
+  <img width="500" height="280" alt="inspect_view" src="https://github.com/user-attachments/assets/47bef233-90e4-4c2d-82da-e5cfe7ef0df6" />
+</p>
+
 
 Every label comes from the world's own metadata, so there are no
 domain-specific terms baked in. An online basemap is available on request
