@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Generated / large data
+*.h5
+*.hdf5
+*.parquet
+*.pmtiles
+*.arrow
+.mayviewer_cache/
+
+# Node / frontend (added in Phase 3)
+node_modules/
+dist/
+.DS_Store
