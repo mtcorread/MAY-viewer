@@ -18,3 +18,7 @@ venv/
 node_modules/
 dist/
 .DS_Store
+tsconfig.tsbuildinfo
+
+# Large input data (shapefiles, raw sources)
+user_data/

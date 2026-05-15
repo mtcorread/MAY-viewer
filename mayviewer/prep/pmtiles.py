@@ -29,6 +29,13 @@ import h3
 # H3 resolution -> web mercator zoom it is rendered at (coarse hex, low zoom).
 RES_TO_ZOOM = {3: 4, 5: 7, 7: 10, 9: 13}
 EXTENT = 4096
+# Boundary polygons are clipped per tile; clipping to the *exact* tile box
+# would turn every tile edge into a real polygon edge, which the line layer
+# then strokes as a visible grid. Clip to a slightly buffered box instead:
+# the artificial cut edges fall outside the visible 0..EXTENT tile area
+# (MapLibre clips drawn output to the tile, the neighbouring tile overlaps
+# the seam), so only true boundaries are stroked. Fraction of tile span.
+BOUNDARY_TILE_BUFFER = 0.0625
 
 
 # --------------------------------------------------------------------------- #
@@ -99,6 +106,58 @@ def _geometry(ring_px: list[tuple[int, int]]) -> bytes:
     return bytes(out)
 
 
+def _signed_area(ring: list[tuple[int, int]]) -> int:
+    """Twice the signed area in tile pixel space (y points down)."""
+    a = 0
+    n = len(ring)
+    for i in range(n):
+        x1, y1 = ring[i]
+        x2, y2 = ring[(i + 1) % n]
+        a += x1 * y2 - x2 * y1
+    return a
+
+
+def _ring_cmds(ring: list[tuple[int, int]], cx: int, cy: int,
+               exterior: bool) -> tuple[list[int], int, int]:
+    """Encode one closed ring continuing from cursor (cx, cy). MVT 2.1: an
+    exterior ring must have positive area and a hole negative area in tile
+    space — enforce by reversing when the winding is wrong."""
+    pts = [p for i, p in enumerate(ring)
+           if i == 0 or p != ring[i - 1]]            # drop repeats
+    if len(pts) >= 2 and pts[0] == pts[-1]:
+        pts = pts[:-1]                                # MVT closes implicitly
+    if len(pts) < 3:
+        return [], cx, cy
+    area = _signed_area(pts)
+    if (exterior and area < 0) or (not exterior and area > 0):
+        pts = [pts[0]] + pts[1:][::-1]
+    cmds: list[int] = []
+    fx, fy = pts[0]
+    cmds += [(1 & 0x7) | (1 << 3), _zigzag(fx - cx), _zigzag(fy - cy)]
+    cx, cy = fx, fy
+    rest = pts[1:]
+    cmds.append((2 & 0x7) | (len(rest) << 3))
+    for x, y in rest:
+        cmds += [_zigzag(x - cx), _zigzag(y - cy)]
+        cx, cy = x, y
+    cmds.append((7 & 0x7) | (1 << 3))                 # ClosePath
+    return cmds, cx, cy
+
+
+def _multi_geometry(rings_px: list[list[tuple[int, int]]]) -> bytes:
+    """Encode [exterior, hole, hole, ...] (one polygon) as MVT commands.
+    The first ring is the exterior; the rest are holes."""
+    cmds: list[int] = []
+    cx = cy = 0
+    for idx, ring in enumerate(rings_px):
+        rc, cx, cy = _ring_cmds(ring, cx, cy, exterior=(idx == 0))
+        cmds += rc
+    out = bytearray()
+    for c in cmds:
+        out += _varint(c)
+    return bytes(out)
+
+
 class _LayerBuilder:
     """Accumulates features for one MVT layer in one tile."""
 
@@ -116,25 +175,38 @@ class _LayerBuilder:
             self._keys.append(key)
         return self._key_idx[key]
 
-    def _v(self, value: int) -> int:
-        if value not in self._val_idx:
-            self._val_idx[value] = len(self._vals)
-            # Value.int_value = field 4, varint.
-            self._vals.append(_vfield(4, value))
-        return self._val_idx[value]
+    def _v(self, value) -> int:
+        # Key by (type, value) so an int 1 and string "1" never collide.
+        vkey = (type(value).__name__, value)
+        if vkey not in self._val_idx:
+            self._val_idx[vkey] = len(self._vals)
+            if isinstance(value, bool):
+                self._vals.append(_key(7, 0) + _varint(1 if value else 0))
+            elif isinstance(value, int):
+                self._vals.append(_vfield(4, value))  # Value.int_value = 4
+            else:
+                # Value.string_value = field 1, length-delimited.
+                self._vals.append(_ld(1, str(value).encode()))
+        return self._val_idx[vkey]
 
     def add(self, ring_px, props: dict[str, int]) -> None:
+        """Single-ring polygon (the hexbin path)."""
+        self._emit([ring_px], props)
+
+    def add_polygon(self, rings_px: list[list[tuple[int, int]]], props: dict) -> None:
+        """A polygon as [exterior, hole, hole, ...] (one MVT polygon)."""
+        if rings_px:
+            self._emit(rings_px, props)
+
+    def _emit(self, rings_px: list[list[tuple[int, int]]], props: dict) -> None:
         tags: list[int] = []
         for k, v in props.items():
-            tags += [self._k(k), self._v(int(v))]
+            tags += [self._k(k), self._v(v)]
         body = bytearray()
-        # tags (packed repeated uint32, field 2)
         tag_bytes = b"".join(_varint(t) for t in tags)
-        body += _ld(2, tag_bytes)
-        # type = POLYGON (3), field 3
-        body += _vfield(3, 3)
-        # geometry (packed, field 4)
-        body += _ld(4, _geometry(ring_px))
+        body += _ld(2, tag_bytes)             # tags (field 2)
+        body += _vfield(3, 3)                 # type = POLYGON (field 3)
+        body += _ld(4, _multi_geometry(rings_px))  # geometry (field 4)
         self._feats.append(bytes(body))
 
     def is_empty(self) -> bool:
@@ -218,9 +290,11 @@ def _header(**f) -> bytes:
     h[99] = 1               # tile type = mvt
     h[100] = f["min_zoom"]
     h[101] = f["max_zoom"]
+    _i32 = lambda v: max(-2147483648, min(2147483647, int(v)))
     struct.pack_into(
         "<iiii", h, 102,
-        f["min_lon_e7"], f["min_lat_e7"], f["max_lon_e7"], f["max_lat_e7"],
+        _i32(f["min_lon_e7"]), _i32(f["min_lat_e7"]),
+        _i32(f["max_lon_e7"]), _i32(f["max_lat_e7"]),
     )
     h[118] = f["center_zoom"]
     struct.pack_into("<ii", h, 119, f["center_lon_e7"], f["center_lat_e7"])
@@ -316,6 +390,172 @@ def write_pmtiles(hexlayers: dict, out_path: Path,
     return {
         "tiles": len(entries),
         "zooms": sorted(set(zooms)),
+        "bytes": out_path.stat().st_size,
+        "layers": layer_names,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Boundary polygons -> PMTiles (real shapes, per-tile clipped, per-zoom simp.)
+# --------------------------------------------------------------------------- #
+def _tilex_to_lon(x: float, z: int) -> float:
+    return x / (1 << z) * 360.0 - 180.0
+
+
+def _tiley_to_lat(y: float, z: int) -> float:
+    t = math.pi * (1 - 2 * y / (1 << z))
+    return math.degrees(math.atan(math.sinh(t)))
+
+
+def _rings_to_px(poly, z: int, ox: int, oy: int) -> list[list[tuple[int, int]]]:
+    """A shapely Polygon -> [exterior_px, hole_px, ...] for tile origin ox,oy."""
+    out: list[list[tuple[int, int]]] = []
+    for ring in [poly.exterior, *poly.interiors]:
+        pts: list[tuple[int, int]] = []
+        for lon, lat in ring.coords:
+            px, py = _project(lon, lat, z)
+            pts.append((round(px - ox), round(py - oy)))
+        out.append(pts)
+    return out
+
+
+def write_boundary_pmtiles(levels: list[dict], out_path: Path) -> dict:
+    """Bake matched boundary polygons into one PMTiles archive.
+
+    ``levels`` items: ``{name, bake_zoom, minzoom, maxzoom, features}`` where
+    ``features`` yields ``(geo_id:int, level:int, code:str, shapely_geom)``.
+    Each level is tiled at one representative ``bake_zoom``; MapLibre overzooms
+    its vector tiles losslessly across ``[minzoom, maxzoom]`` so zooming in
+    walks level→level while only viewport tiles are ever fetched. Polygons are
+    simplified per zoom and clipped to each covered tile (so a region at low
+    zoom or an OA at high zoom never ships a whole-world geometry)."""
+    from shapely.geometry import box  # bake-only dep (the optional [geo] extra)
+    from shapely import set_precision
+
+    tiles: dict[tuple[int, int, int], dict[str, _LayerBuilder]] = {}
+    minlat = minlon = 1e9
+    maxlat = maxlon = -1e9
+    layer_names: list[str] = []
+    layer_meta: list[dict] = []
+    feat_count = 0
+
+    for spec in levels:
+        name = spec["name"]
+        z = int(spec["bake_zoom"])
+        layer_names.append(name)
+        layer_meta.append({
+            "id": name,
+            "fields": {"geo_id": "Number", "level": "Number", "code": "String"},
+            "minzoom": int(spec["minzoom"]),
+            "maxzoom": int(spec["maxzoom"]),
+        })
+        n = 1 << z
+        # ~1.5 px simplification tolerance in degrees at this zoom.
+        tol = 1.5 * 360.0 / (n * EXTENT)
+        for geo_id, level, code, geom in spec["features"]:
+            if geom is None or geom.is_empty:
+                continue
+            g = geom.simplify(tol, preserve_topology=True)
+            if g.is_empty:
+                g = geom
+            g = set_precision(g, 1e-7)  # drop sub-cm noise; fixes slivers
+            if g.is_empty:
+                continue
+            mnx, mny, mxx, mxy = g.bounds
+            minlon, maxlon = min(minlon, mnx), max(maxlon, mxx)
+            minlat, maxlat = min(minlat, mny), max(maxlat, mxy)
+            tx0 = max(0, int((mnx + 180.0) / 360.0 * n))
+            tx1 = min(n - 1, int((mxx + 180.0) / 360.0 * n))
+            # y is inverted: max latitude -> smallest tile y.
+            ty0 = max(0, int(_project(0.0, mxy, z)[1] // EXTENT))
+            ty1 = min(n - 1, int(_project(0.0, mny, z)[1] // EXTENT))
+            props = {"geo_id": int(geo_id), "level": int(level),
+                     "code": "" if code is None else str(code)}
+            for tx in range(tx0, tx1 + 1):
+                west = _tilex_to_lon(tx, z)
+                east = _tilex_to_lon(tx + 1, z)
+                for ty in range(ty0, ty1 + 1):
+                    north = _tiley_to_lat(ty, z)
+                    south = _tiley_to_lat(ty + 1, z)
+                    # Buffer the clip box so tile-cut edges land outside the
+                    # visible tile (no stroked grid); true edges are unaffected.
+                    bx = (east - west) * BOUNDARY_TILE_BUFFER
+                    by = (north - south) * BOUNDARY_TILE_BUFFER
+                    clip = box(west - bx, south - by, east + bx, north + by)
+                    piece = g.intersection(clip)
+                    if piece.is_empty:
+                        continue
+                    polys = (list(piece.geoms)
+                             if piece.geom_type.startswith("Multi")
+                             or piece.geom_type == "GeometryCollection"
+                             else [piece])
+                    ox, oy = tx * EXTENT, ty * EXTENT
+                    key = (z, tx, ty)
+                    tl = tiles.setdefault(key, {})
+                    lb = tl.get(name)
+                    if lb is None:
+                        lb = tl[name] = _LayerBuilder(name)
+                    for pg in polys:
+                        if getattr(pg, "geom_type", "") != "Polygon" or pg.is_empty:
+                            continue
+                        lb.add_polygon(_rings_to_px(pg, z, ox, oy), props)
+                        feat_count += 1
+
+    blobs: list[tuple[int, bytes]] = []
+    for (z, x, y), tl in tiles.items():
+        data = _encode_tile([tl[n] for n in tl])
+        blobs.append((_zxy_to_tileid(z, x, y), data))
+    blobs.sort(key=lambda t: t[0])
+
+    data_buf = bytearray()
+    entries: list[tuple[int, int, int, int]] = []
+    for tid, blob in blobs:
+        entries.append((tid, len(data_buf), len(blob), 1))
+        data_buf += blob
+
+    root_dir = gzip.compress(_serialize_directory(entries))
+    bake_zooms = [int(s["bake_zoom"]) for s in levels] or [0]
+    all_min = min((int(s["minzoom"]) for s in levels), default=0)
+    all_max = max((int(s["maxzoom"]) for s in levels), default=0)
+    meta = gzip.compress(json.dumps({
+        "vector_layers": layer_meta,
+        "attribution": "MAY-viewer",
+    }).encode())
+
+    HLEN = 127
+    root_off = HLEN
+    meta_off = root_off + len(root_dir)
+    data_off = meta_off + len(meta)
+    if minlat > maxlat:
+        minlat = maxlat = minlon = maxlon = 0.0
+    header = _header(
+        root_off=root_off, root_len=len(root_dir),
+        meta_off=meta_off, meta_len=len(meta),
+        leaf_off=0, leaf_len=0,
+        data_off=data_off, data_len=len(data_buf),
+        n_addr=len(entries), n_entries=len(entries), n_contents=len(entries),
+        min_zoom=min(bake_zooms), max_zoom=all_max,
+        min_lon_e7=int(minlon * 1e7), min_lat_e7=int(minlat * 1e7),
+        max_lon_e7=int(maxlon * 1e7), max_lat_e7=int(maxlat * 1e7),
+        center_zoom=min(bake_zooms),
+        center_lon_e7=int((minlon + maxlon) / 2 * 1e7),
+        center_lat_e7=int((minlat + maxlat) / 2 * 1e7),
+    )
+
+    out_path = Path(out_path)
+    with open(out_path, "wb") as fh:
+        fh.write(header)
+        fh.write(root_dir)
+        fh.write(meta)
+        fh.write(data_buf)
+
+    return {
+        "path": out_path.name,
+        "tiles": len(entries),
+        "features": feat_count,
+        "bake_zooms": sorted(set(bake_zooms)),
+        "minzoom": all_min,
+        "maxzoom": all_max,
         "bytes": out_path.stat().st_size,
         "layers": layer_names,
     }

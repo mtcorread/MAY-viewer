@@ -43,14 +43,25 @@ def _fingerprint(source: Path) -> dict:
     return {"size": st.st_size, "mtime": int(st.st_mtime)}
 
 
-def prep(source: str | Path, force: bool = False) -> dict:
+def prep(source: str | Path, force: bool = False,
+         boundary_config: str | Path | None = None) -> dict:
     source = Path(source).resolve()
     out = cache_dir(source)
     manifest_path = out / "manifest.json"
 
+    # Boundaries change the cache contents, so a config (or its absence/edit)
+    # must invalidate an otherwise up-to-date cache.
+    bcfg = None
+    if boundary_config:
+        from .boundaries import load_boundary_config
+        bcfg = load_boundary_config(boundary_config)
+    bfp = _fingerprint(Path(boundary_config).resolve()) if boundary_config else None
+
     if manifest_path.exists() and not force:
         existing = json.loads(manifest_path.read_text())
-        if existing.get("source", {}).get("fingerprint") == _fingerprint(source):
+        src = existing.get("source", {})
+        if (src.get("fingerprint") == _fingerprint(source)
+                and src.get("boundary_fingerprint") == bfp):
             logger.info("Cache up to date: %s", out)
             return existing
 
@@ -61,11 +72,25 @@ def prep(source: str | Path, force: bool = False) -> dict:
     with WorldReader(source) as r:
         geo = geo_tree.build(r)
 
+        boundaries_artifact: dict | None = None
+        b_results: list = []
+        if bcfg:
+            from . import boundary_build
+            logger.info("Boundaries: streaming shapes, matching, baking...")
+            b_stats, b_results = boundary_build.build_boundaries(
+                schema, geo, bcfg, out)
+            if b_stats:
+                boundaries_artifact = boundary_build.report_payload(
+                    b_stats, b_results)
+
         logger.info("Aggregates: sweeping leaves...")
         rows, props = aggregates.compute(r, schema, geo)
         tables = aggregates.to_tables(rows, props, schema, geo)
         agg_paths = {}
         for lv, tbl in tables.items():
+            if b_results:
+                from . import boundary_build
+                tbl = boundary_build.attach_extent_columns(tbl, lv, b_results)
             p = out / "aggregates" / f"level_{lv}.parquet"
             pq.write_table(tbl, p)
             agg_paths[str(lv)] = {
@@ -95,6 +120,7 @@ def prep(source: str | Path, force: bool = False) -> dict:
             "path": str(source),
             "name": source.name,
             "fingerprint": _fingerprint(source),
+            "boundary_fingerprint": bfp,
         },
         "schema": asdict(schema),
         "geo": {
@@ -113,6 +139,7 @@ def prep(source: str | Path, force: bool = False) -> dict:
                 "members": {"path": m_name, "row_groups": m_idx},
             },
             "hexbin": {"path": "hexbin.pmtiles", **pm_stats},
+            **({"boundaries": boundaries_artifact} if boundaries_artifact else {}),
         },
         "peak_unit_rows": peak,
         "build_seconds": round(time.time() - t0, 1),

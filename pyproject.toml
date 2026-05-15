@@ -12,6 +12,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+# Optional: geographic boundary overlay ingestion. Pure-Python .shp reader
+# (pyshp) + shapely/pyproj (PROJ wheels, no system GDAL). The `match`
+# diagnostic only needs pyshp; the full bake also needs shapely + pyproj.
+geo = ["pyshp>=2.3", "shapely>=2.0", "pyproj>=3.6"]
 
 [project.scripts]
 mayviewer = "mayviewer.cli:main"
