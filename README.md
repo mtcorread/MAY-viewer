@@ -18,13 +18,10 @@ pip install -e .
 # See what a world contains
 mayviewer describe /path/to/world_state.h5
 
-# Generate a scaled synthetic world
-mayviewer synth /path/to/world_state.h5 --people 60M --out world_60m.h5
-
 # Build the viewer's cached artifacts
 mayviewer prep /path/to/world_state.h5
 
-# Open the browser viewer
+# Open the browser viewer (serves what prep built)
 mayviewer serve /path/to/world_state.h5
 ```
 
