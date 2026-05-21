@@ -92,6 +92,17 @@ class WorldReader:
     def __contains__(self, path: str) -> bool:
         return path in self._f
 
+    @property
+    def has_spatial(self) -> bool:
+        """True iff this world carries geographic coordinates.
+
+        MAY worlds without `geography/latitudes` have no spatial layout — the
+        viewer's map, hexbin and boundary layers can't be built. The prep
+        pipeline degrades to a mapless cache (tree + drilldown + aggregates
+        only) when this is False.
+        """
+        return "geography/latitudes" in self._f and "geography/longitudes" in self._f
+
     # -- partition indices ------------------------------------------------ #
     def partition(self, container: str) -> Partition:
         """Cached CSR index for a container (see ``PARTITIONS``)."""

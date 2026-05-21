@@ -9,7 +9,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@fontsource/ibm-plex-sans": "^5.2.8",
+    "@fontsource/inter": "^5.2.5",
+    "@fontsource/jetbrains-mono": "^5.2.5",
     "hyparquet": "^1.17.1",
     "hyparquet-compressors": "^1.1.1",
     "maplibre-gl": "^4.7.1",

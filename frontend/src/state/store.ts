@@ -7,6 +7,7 @@ import {
 import { readAggregates } from "../data/parquet";
 import { FIXED_COLS } from "../data/columns";
 import { loadAppConfig, type BasemapSpec } from "../data/appConfig";
+import { loadLabels, type Labels } from "../data/labels";
 
 export interface AggRow {
   geo_id: number;
@@ -40,6 +41,7 @@ interface State {
   mapMode: MapMode; // boundaries (clickable polygons) vs hexbin density
   basemap: BasemapSpec | null; // opt-in online basemap (null = not enabled)
   basemapOn: boolean; // user toggle; only meaningful when basemap != null
+  labels: Labels; // optional user-supplied attribute-code → display map
   hexLayer: string; // which pmtiles layer is shown
   levels: { value: number; name: string }[]; // coarse → fine
   levelCache: Map<number, LevelData>;
@@ -85,6 +87,7 @@ export const useStore = create<State>((set, get) => ({
   mapMode: "hexbin",
   basemap: null,
   basemapOn: false,
+  labels: {},
   hexLayer: "",
   levels: [],
   levelCache: new Map(),
@@ -96,22 +99,27 @@ export const useStore = create<State>((set, get) => ({
 
   init: async () => {
     try {
-      const [manifest, appConfig] = await Promise.all([
+      const [manifest, appConfig, labels] = await Promise.all([
         loadManifest(),
         loadAppConfig(),
+        loadLabels(),
       ]);
       const levels = levelsCoarseToFine(manifest.geo);
       set({
         manifest,
         levels,
-        hexLayer: manifest.artifacts.hexbin.layers[0] ?? "",
+        hexLayer: manifest.artifacts.hexbin?.layers[0] ?? "",
         // Boundaries are the click target when shapes were baked; otherwise
         // the hexbin density backdrop is the only map (non-negotiable #6).
         mapMode: manifest.artifacts.boundaries ? "boundaries" : "hexbin",
+        // A mapless world (no geography/latitudes) has no map to show; force
+        // Inspect mode so users land on the tree+drilldown immediately.
+        mode: manifest.spatial ? "map" : "inspect",
         // The operator passing `serve --basemap …` IS the explicit opt-in,
         // so show it on by default; "None" in the switcher turns it off.
         basemap: appConfig.basemap,
         basemapOn: !!appConfig.basemap,
+        labels,
       });
       // Load the coarsest level and seat the breadcrumb at its root unit.
       const root = await get().ensureLevel(levels[0].value);

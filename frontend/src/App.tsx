@@ -34,25 +34,38 @@ export function App() {
     );
 
   const s = manifest.schema;
+  // Mapless cache (no geography/latitudes) ⇒ no Map mode to switch into.
+  const mapless = !manifest.spatial;
 
   return (
-    <div className={"app" + (mode === "inspect" ? " inspect" : "")}>
+    <div
+      className={
+        "app" +
+        (mode === "inspect" ? " inspect" : "") +
+        (mapless ? " mapless" : "")
+      }
+    >
       <header className="topbar">
         <div className="brand">
           <span className="w">May</span>
           <span className="t">· Viewer</span>
         </div>
         <div className="sep" />
-        <div className="file mono">{manifest.source.name}</div>
-
-        <div className="modes">
-          <button className={mode === "map" ? "on" : ""} onClick={() => setMode("map")}>
-            Map
-          </button>
-          <button className={mode === "inspect" ? "on" : ""} onClick={() => setMode("inspect")}>
-            Inspect
-          </button>
+        <div className="file mono">
+          {manifest.source.name}
+          {mapless && <span className="badge"> · mapless</span>}
         </div>
+
+        {!mapless && (
+          <div className="modes">
+            <button className={mode === "map" ? "on" : ""} onClick={() => setMode("map")}>
+              Map
+            </button>
+            <button className={mode === "inspect" ? "on" : ""} onClick={() => setMode("inspect")}>
+              Inspect
+            </button>
+          </div>
+        )}
 
         <div className="kpis">
           <div className="kpi">
@@ -70,11 +83,16 @@ export function App() {
         </div>
       </header>
 
-      {mode === "map" ? (
+      {mode === "map" && !mapless ? (
         <>
           <GeoTree />
           <MapView />
           <StatsPanel />
+        </>
+      ) : mapless ? (
+        <>
+          <GeoTree />
+          <Inspector />
         </>
       ) : (
         <Inspector />

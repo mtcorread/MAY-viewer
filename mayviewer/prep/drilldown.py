@@ -184,6 +184,12 @@ def write_venues(reader, schema, out_dir: Path) -> tuple[str, dict[int, int]]:
     sch = pa.schema(fields)
     w = _ShardWriter(out_dir / "venues.parquet", sch)
 
+    # Older / non-georeferenced MAY worlds may lack is_residence and lat/lon.
+    # Treat as null so the cache stays renderable in mapless mode.
+    has_isres = "venues/is_residence" in reader
+    has_vlat = "venues/latitudes" in reader
+    has_vlon = "venues/longitudes" in reader
+
     for gid, s, c in reader.partition("venues"):
         if c == 0:
             continue
@@ -197,9 +203,12 @@ def write_venues(reader, schema, out_dir: Path) -> tuple[str, dict[int, int]]:
             "name": [_dec(n) for n in names[s:s + c]] if names is not None
             else [str(v) for v in vids],
             "parent_id": reader.slice("venues/parent_ids", s, c).astype(np.int64),
-            "is_residence": reader.slice("venues/is_residence", s, c),
-            "lat": reader.slice("venues/latitudes", s, c),
-            "lon": reader.slice("venues/longitudes", s, c),
+            "is_residence": (reader.slice("venues/is_residence", s, c)
+                             if has_isres else [None] * c),
+            "lat": (reader.slice("venues/latitudes", s, c)
+                    if has_vlat else np.full(c, np.nan, np.float32)),
+            "lon": (reader.slice("venues/longitudes", s, c)
+                    if has_vlon else np.full(c, np.nan, np.float32)),
             "rank_in_type": ranks,
         }
         for col in prop_cols:

@@ -16,9 +16,12 @@ export function GeoTree() {
     useStore();
   const [kids, setKids] = useState<AggRow[]>([]);
   const [loading, setLoading] = useState(false);
+  const [rootSiblings, setRootSiblings] = useState<AggRow[]>([]);
 
   const lvIdx = selected ? levels.findIndex((l) => l.value === selected.level) : -1;
   const childLevel = lvIdx >= 0 && lvIdx + 1 < levels.length ? levels[lvIdx + 1] : null;
+  const atRoot = lvIdx === 0;
+  const rootLevel = levels[0] ?? null;
 
   useEffect(() => {
     let alive = true;
@@ -39,6 +42,29 @@ export function GeoTree() {
       alive = false;
     };
   }, [selected, childLevel, ensureLevel]);
+
+  // When the selection sits at the coarsest level, the breadcrumb has no
+  // parent to climb to — surface the other top-level units here so they
+  // remain reachable. Hidden when there is only one root (no siblings).
+  useEffect(() => {
+    let alive = true;
+    if (!atRoot || !rootLevel) {
+      setRootSiblings([]);
+      return;
+    }
+    void ensureLevel(rootLevel.value).then((d) => {
+      if (!alive) return;
+      if (d.rows.length <= 1) {
+        setRootSiblings([]);
+        return;
+      }
+      const rows = d.rows.slice().sort((a, b) => num(b.people) - num(a.people));
+      setRootSiblings(rows);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [atRoot, rootLevel, ensureLevel]);
 
   if (!selected) return <div className="geopanel loading pulse">locating root…</div>;
 
@@ -66,6 +92,40 @@ export function GeoTree() {
           })}
         </div>
       </div>
+
+      {atRoot && rootSiblings.length > 1 && rootLevel && (
+        <div>
+          <div className="cap" style={{ display: "flex", justifyContent: "space-between" }}>
+            <span>{rootLevel.name}</span>
+            <span className="mono" style={{ letterSpacing: 0 }}>
+              {`${nf.format(rootSiblings.length)} units`}
+            </span>
+          </div>
+          <div className="children">
+            {rootSiblings.map((r) => {
+              const active = r.geo_id === selected.geo_id;
+              return (
+                <button
+                  key={r.geo_id}
+                  className={"childrow" + (active ? " sel" : "")}
+                  onClick={() =>
+                    drillTo({
+                      geo_id: r.geo_id,
+                      geo_name: r.geo_name,
+                      level: r.level,
+                      level_name: r.level_name,
+                    })
+                  }
+                >
+                  <span className="nm">{r.geo_name}</span>
+                  <span className="ct">{compact(num(r.people))}</span>
+                  <span className="chev">{active ? "●" : "↧"}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {childLevel ? (
         <div>

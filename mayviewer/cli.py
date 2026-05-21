@@ -86,7 +86,10 @@ def main(argv=None) -> int:
         print(f"  people  {len(dd['people']['row_groups']):,} units  "
               f"venues {len(dd['venues']['row_groups']):,}  "
               f"members {len(dd['members']['row_groups']):,}")
-        print(f"  hexbin  {a['hexbin']['tiles']:,} tiles zooms={a['hexbin']['zooms']}")
+        if "hexbin" in a:
+            print(f"  hexbin  {a['hexbin']['tiles']:,} tiles zooms={a['hexbin']['zooms']}")
+        else:
+            print("  hexbin  (skipped — mapless world)")
         if "boundaries" in a:
             b = a["boundaries"]
             print(f"  boundaries {b['tiles']:,} tiles  {b['features']:,} polys")

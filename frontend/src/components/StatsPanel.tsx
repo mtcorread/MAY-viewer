@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useStore, type AggRow } from "../state/store";
 import { parseAggregateColumns, type MetricGroup } from "../data/columns";
+import type { Labels } from "../data/labels";
 import { num, nf, compact, pct } from "../util/format";
 
 // Right "Stats" panel (Map mode). Hero block + one section per demographic,
@@ -8,7 +9,7 @@ import { num, nf, compact, pct } from "../util/format";
 // the aggregate column tokens / manifest — nothing hardcoded.
 
 export function StatsPanel() {
-  const { selected, ensureLevel } = useStore();
+  const { selected, ensureLevel, labels } = useStore();
   const [row, setRow] = useState<AggRow | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -62,7 +63,7 @@ export function StatsPanel() {
 
       {groups.map((g, i) =>
         g.kind === "venues" ? (
-          <VenueGroup key={g.key} g={g} row={row} />
+          <VenueGroup key={g.key} g={g} row={row} labels={labels} />
         ) : (
           <DistGroup
             key={g.key}
@@ -70,6 +71,7 @@ export function StatsPanel() {
             row={row}
             total={people}
             color={i % 2 === 0 ? "coral" : "pine"}
+            labels={labels}
           />
         ),
       )}
@@ -82,16 +84,28 @@ function DistGroup({
   row,
   total,
   color,
+  labels,
 }: {
   g: MetricGroup;
   row: AggRow;
   total: number;
   color: "coral" | "pine";
+  labels: Labels;
 }) {
-  const vals = g.items.map((it) => ({ ...it, v: num(row[it.col]) }));
+  // Apply user-supplied labels — only the *raw* token is looked up;
+  // humanise()d English labels for unmapped values stay as-is.
+  const itemLabel = (raw: string, fallback: string): string => {
+    if (g.kind === "age") return fallback; // ranges aren't categorical codes
+    const m = labels[g.key];
+    return (m && m[raw]) || fallback;
+  };
+  const vals = g.items.map((it) => ({
+    ...it,
+    label: itemLabel(it.raw, it.label),
+    v: num(row[it.col]),
+  }));
   const sum = vals.reduce((a, b) => a + b.v, 0);
-  const denom = g.kind === "age" || g.kind === "sex" ? total || sum : sum;
-  const max = vals.reduce((m, x) => Math.max(m, x.v), 0) || 1;
+  const denom = (g.kind === "age" || g.kind === "sex" ? total || sum : sum) || 1;
   return (
     <section className="statsec">
       <div className="statsec-h">
@@ -106,7 +120,7 @@ function DistGroup({
           <span className="bar-track">
             <span
               className={"bar-fill " + color}
-              style={{ width: `${(100 * x.v) / max}%` }}
+              style={{ width: `${(100 * x.v) / denom}%` }}
             />
           </span>
           <span className="val">
@@ -118,10 +132,19 @@ function DistGroup({
   );
 }
 
-function VenueGroup({ g, row }: { g: MetricGroup; row: AggRow }) {
+function VenueGroup({
+  g,
+  row,
+  labels,
+}: {
+  g: MetricGroup;
+  row: AggRow;
+  labels: Labels;
+}) {
+  const m = labels.venues;
   const rows = g.items
     .map((it) => ({
-      label: it.label,
+      label: (m && m[it.raw]) || it.label,
       count: num(row[it.col]),
       occ: g.occ?.[it.raw] ? num(row[g.occ[it.raw]]) : null,
     }))

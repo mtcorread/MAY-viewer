@@ -13,21 +13,21 @@ import { compact, num } from "../util/format";
 //    level's band. Polygons are the click target → store.drillToGeo.
 //  • "hexbin" — the density backdrop, the no-shapes fallback and a toggle.
 //
-// The visual language is Direction E "Refined": warm paper ground, coral
-// overlay polygons, floating glass cards. Still 100% offline.
+// The visual language is Direction E "Refined": Nordic paper ground,
+// electric-blue overlay polygons, floating glass cards. Still 100% offline.
 
-// Warm, paper-compatible density ramps (low → high).
+// Cool, paper-compatible density ramps (low → high).
 const RAMP: Record<string, string[]> = {
-  _people: ["#efe7d2", "#e0b48a", "#cf8a55", "#bf6238", "#a4452b"],
-  _venues: ["#efe7d2", "#cdb98a", "#9c8a45", "#5a6b3a", "#2c5341"],
+  _people: ["#dde4f0", "#a8bfe3", "#6f93d7", "#3f6fcc", "#1d4ed8"],
+  _venues: ["#dde7e5", "#a3c5c0", "#5f9a93", "#2e7e76", "#0b5b55"],
 };
 function rampFor(layer: string): string[] {
   return RAMP["_" + layer] ?? RAMP._people;
 }
 
-const CORAL = "#c75b3a";
-const CORAL_D = "#a4452b";
-const PAPER = "#f6f1e6";
+const CORAL = "#2563eb";
+const CORAL_D = "#1d4ed8";
+const PAPER = "#f4f5f7";
 const NONE_FILTER: maplibregl.FilterSpecification = ["==", ["get", "geo_id"], -1];
 
 interface Tip {
@@ -53,7 +53,9 @@ export function MapView() {
     basemapOn,
     setBasemapOn,
   } = useStore();
-  const layers = manifest?.artifacts.hexbin.layers ?? [];
+  // MapView only mounts in map mode, which the shell hides for mapless
+  // caches — hexbin is therefore guaranteed present once `manifest` is set.
+  const layers = manifest?.artifacts.hexbin?.layers ?? [];
   const boundaries = manifest?.artifacts.boundaries;
   const [domain, setDomain] = useState<[number, number]>([1, 1000]);
   const [tip, setTip] = useState<Tip | null>(null);
@@ -64,9 +66,10 @@ export function MapView() {
     const proto = new Protocol();
     maplibregl.addProtocol("pmtiles", proto.tile);
 
-    const hexUrl = `${CACHE}/${manifest.artifacts.hexbin.path}`;
+    const hex = manifest.artifacts.hexbin!;
+    const hexUrl = `${CACHE}/${hex.path}`;
     const hexAbs = new URL(hexUrl, location.href).href;
-    const zooms = [...manifest.artifacts.hexbin.zooms].sort((a, b) => a - b);
+    const zooms = [...hex.zooms].sort((a, b) => a - b);
     const srcZoom = zooms[Math.min(1, zooms.length - 1)] ?? 0;
 
     const sources: Record<string, maplibregl.SourceSpecification> = {
@@ -100,7 +103,7 @@ export function MapView() {
       });
     }
     styleLayers.push(
-      ...manifest.artifacts.hexbin.layers.map(
+      ...hex.layers.map(
         (lyr): maplibregl.LayerSpecification => ({
           id: `hex-${lyr}`,
           type: "fill",
@@ -108,9 +111,9 @@ export function MapView() {
           "source-layer": lyr,
           layout: { visibility: "none" },
           paint: {
-            "fill-color": "#cf8a55",
+            "fill-color": "#6f93d7",
             "fill-opacity": 0.82,
-            "fill-outline-color": "rgba(246,241,230,0.5)",
+            "fill-outline-color": "rgba(244,245,247,0.5)",
           },
         }),
       ),
@@ -373,7 +376,7 @@ export function MapView() {
                 "visibility",
                 bnd ? "visible" : "none",
               );
-        const zs = manifest!.artifacts.hexbin.zooms;
+        const zs = manifest!.artifacts.hexbin!.zooms;
         if (bnd) {
           map.setMinZoom(Math.min(...boundaries.levels.map((l) => l.bake_zoom)));
           map.setMaxZoom(22);

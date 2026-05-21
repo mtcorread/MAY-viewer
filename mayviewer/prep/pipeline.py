@@ -71,10 +71,15 @@ def prep(source: str | Path, force: bool = False,
 
     with WorldReader(source) as r:
         geo = geo_tree.build(r)
+        spatial = r.has_spatial
 
         boundaries_artifact: dict | None = None
         b_results: list = []
-        if bcfg:
+        if bcfg and not spatial:
+            logger.warning(
+                "Boundary config supplied but world has no geography/"
+                "latitudes — boundaries require coordinates; ignoring.")
+        if bcfg and spatial:
             from . import boundary_build
             logger.info("Boundaries: streaming shapes, matching, baking...")
             b_stats, b_results = boundary_build.build_boundaries(
@@ -104,15 +109,37 @@ def prep(source: str | Path, force: bool = False,
         v_name, v_idx = drilldown.write_venues(r, schema, out)
         m_name, m_idx = drilldown.write_members(r, schema, out)
 
-        logger.info("Hexbin pyramid -> PMTiles...")
-        hx = hexbin.build(r, schema, geo)
-        pm_stats = pmtiles.write_pmtiles(hx, out / "hexbin.pmtiles")
+        pm_stats: dict | None = None
+        if spatial:
+            logger.info("Hexbin pyramid -> PMTiles...")
+            hx = hexbin.build(r, schema, geo)
+            pm_stats = pmtiles.write_pmtiles(hx, out / "hexbin.pmtiles")
+        else:
+            logger.info("Mapless world (no geography/latitudes): "
+                        "skipping hexbin + boundaries.")
 
         # Largest single-unit slice per container == the pipeline's actual
         # peak-memory bound; recorded so 60M runs can be reasoned about.
-        peak = {c: r.partition(c).max_count
-                for c in ("population", "venues", "subsets", "members",
-                          "activity")}
+        # Some worlds omit containers entirely (e.g. no activity_mappings) —
+        # skip those rather than failing.
+        from .reader import PARTITIONS
+        peak = {}
+        for c, base in PARTITIONS.items():
+            if base in r:
+                peak[c] = r.partition(c).max_count
+
+    artifacts: dict = {
+        "aggregates": agg_paths,
+        "drilldown": {
+            "people": {"path": p_name, "row_groups": p_idx},
+            "venues": {"path": v_name, "row_groups": v_idx},
+            "members": {"path": m_name, "row_groups": m_idx},
+        },
+    }
+    if pm_stats is not None:
+        artifacts["hexbin"] = {"path": "hexbin.pmtiles", **pm_stats}
+    if boundaries_artifact:
+        artifacts["boundaries"] = boundaries_artifact
 
     manifest = {
         "manifest_version": MANIFEST_VERSION,
@@ -122,6 +149,7 @@ def prep(source: str | Path, force: bool = False,
             "fingerprint": _fingerprint(source),
             "boundary_fingerprint": bfp,
         },
+        "spatial": spatial,
         "schema": asdict(schema),
         "geo": {
             "level_values": geo.level_values,
@@ -131,16 +159,7 @@ def prep(source: str | Path, force: bool = False,
             "units_per_level": {str(lv): int(len(geo.ids_at(lv)))
                                 for lv in geo.level_values},
         },
-        "artifacts": {
-            "aggregates": agg_paths,
-            "drilldown": {
-                "people": {"path": p_name, "row_groups": p_idx},
-                "venues": {"path": v_name, "row_groups": v_idx},
-                "members": {"path": m_name, "row_groups": m_idx},
-            },
-            "hexbin": {"path": "hexbin.pmtiles", **pm_stats},
-            **({"boundaries": boundaries_artifact} if boundaries_artifact else {}),
-        },
+        "artifacts": artifacts,
         "peak_unit_rows": peak,
         "build_seconds": round(time.time() - t0, 1),
     }

@@ -1,33 +1,36 @@
-@import "@fontsource/ibm-plex-sans/400.css";
-@import "@fontsource/ibm-plex-sans/500.css";
-@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
 @import "maplibre-gl/dist/maplibre-gl.css";
 
 /* ── MAY-viewer · Direction E "Refined" ─────────────────────────────────
-   Warm light theme, single sans family (IBM Plex Sans). Hierarchy is made
-   by size + weight, not family. Numeric cells align via tabular figures.
+   Nordic light theme: cool off-white + slate ink + electric blue accent
+   + teal secondary. Single sans family (Inter); hierarchy is made by size
+   + weight, not family. Numeric cells align via tabular figures.
    No domain terms live in CSS — every label is painted at runtime. */
 
 :root {
   /* surface */
-  --paper:   #f6f1e6;
-  --card:    #fbf8f0;
-  --cardSel: #ede5d1;
-  --hair:    #e6dec9;
-  --hairS:   #d6cdb4;
+  --paper:   #f4f5f7;
+  --card:    #fbfcfd;
+  --cardSel: #e3e8ef;
+  --hair:    #dfe3eb;
+  --hairS:   #c5ccd6;
 
   /* ink */
-  --ink:     #2a2920;
-  --ink2:    #54513f;
-  --ink3:    #8a8470;
+  --ink:     #13171c;
+  --ink2:    #3a4250;
+  --ink3:    #7b8492;
 
-  /* accent */
-  --coral:   #c75b3a;
-  --coralD:  #a4452b;
-  --pine:    #3f6b56;
-  --pineD:   #2c5341;
+  /* accent — names kept (coral/pine) so call-sites are unchanged */
+  --coral:   #2563eb;
+  --coralD:  #1d4ed8;
+  --pine:    #0f766e;
+  --pineD:   #0b5b55;
 
-  --shadow: 0 6px 24px rgba(60,40,10,0.07), 0 1px 0 rgba(60,40,10,0.04);
+  --shadow: 0 6px 24px rgba(15,23,42,0.07), 0 1px 0 rgba(15,23,42,0.04);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -42,15 +45,19 @@ html, body, #root {
   height: 100%;
   background: var(--paper);
   color: var(--ink);
-  font-family: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
   font-size: 13px;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 body { overflow: hidden; }
 
-/* tabular numerals for any number-heavy cell */
-.mono { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+/* JetBrains Mono for IDs and uppercase labels; tabular numerals everywhere */
+.mono {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
 
 .eyebrow {
   font-size: 10px;
@@ -84,6 +91,15 @@ h1, h2, h3 { font-weight: 600; }
   grid-template-rows: 60px 42px 1fr;
   grid-template-columns: 1fr;
 }
+/* Mapless world: GeoTree on the left replaces the map-mode left rail; the
+   crumb trail and cascade flow in the right column. */
+.app.inspect.mapless {
+  grid-template-rows: 60px 42px 1fr;
+  grid-template-columns: 280px 1fr;
+}
+.app.inspect.mapless .geopanel { grid-row: 2 / span 2; grid-column: 1; }
+.app.inspect.mapless .crumbtrail { grid-column: 2; }
+.app.inspect.mapless .casc { grid-column: 2; }
 
 /* ── Header ───────────────────────────────────────────────────────────── */
 .topbar {
@@ -98,6 +114,10 @@ h1, h2, h3 { font-weight: 600; }
 .brand .t { font-size: 10px; letter-spacing: 0.16em; color: var(--ink3); margin-left: 8px; text-transform: uppercase; }
 .topbar .sep { width: 1px; height: 26px; background: var(--hair); }
 .file { font-size: 12px; color: var(--ink2); }
+.file .badge {
+  font-size: 9.5px; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--ink3); margin-left: 4px;
+}
 
 .modes { display: flex; background: var(--paper); border: 1px solid var(--hair); border-radius: 6px; padding: 3px; }
 .modes button {
@@ -173,7 +193,7 @@ h1, h2, h3 { font-weight: 600; }
 .maplibregl-map { background: var(--paper) !important; }
 
 .efloat {
-  background: rgba(251,248,240,0.94);
+  background: rgba(251,252,253,0.94);
   backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
   border: 1px solid var(--hairS);
   box-shadow: var(--shadow);
@@ -182,7 +202,7 @@ h1, h2, h3 { font-weight: 600; }
 
 .map-hint {
   position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
-  background: rgba(42,41,32,0.86); color: var(--paper);
+  background: rgba(19,23,28,0.86); color: var(--paper);
   padding: 7px 16px; border-radius: 999px; font-size: 11px; letter-spacing: 0.04em;
   pointer-events: none; z-index: 3;
 }
@@ -190,7 +210,7 @@ h1, h2, h3 { font-weight: 600; }
 .zoomctl { position: absolute; top: 16px; right: 16px; z-index: 3; display: flex; flex-direction: column; }
 .zoomctl button {
   width: 32px; height: 32px; display: grid; place-items: center;
-  background: rgba(251,248,240,0.96); border: 1px solid var(--hairS);
+  background: rgba(251,252,253,0.96); border: 1px solid var(--hairS);
   color: var(--ink); font: inherit; font-size: 14px; cursor: pointer;
 }
 .zoomctl button:first-child { border-radius: 6px 6px 0 0; }
@@ -233,7 +253,7 @@ h1, h2, h3 { font-weight: 600; }
 
 .map-attrib {
   position: absolute; right: 8px; bottom: 6px; z-index: 2;
-  background: rgba(251,248,240,0.7); border-radius: 4px; padding: 2px 7px;
+  background: rgba(251,252,253,0.7); border-radius: 4px; padding: 2px 7px;
   font-size: 10px; color: var(--ink3); pointer-events: none;
 }
 
@@ -293,8 +313,6 @@ h1, h2, h3 { font-weight: 600; }
 .crumbtrail .cb.active { color: var(--coral); font-weight: 500; }
 .crumbtrail .cb:hover { color: var(--coral); }
 .crumbtrail .csep { color: var(--ink3); font-size: 11px; }
-.crumbtrail .keys { margin-left: auto; display: flex; gap: 18px; font-size: 11px; color: var(--ink3); }
-.crumbtrail .keys b { color: var(--ink); font-weight: 600; }
 
 /* ── Inspect · cascade ────────────────────────────────────────────────── */
 .casc {
@@ -327,7 +345,7 @@ h1, h2, h3 { font-weight: 600; }
 .crow {
   display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center;
   padding: 10px 18px; border: 0;
-  border-bottom: 1px solid rgba(230,222,201,0.5);
+  border-bottom: 1px solid rgba(223,227,235,0.5);
   background: transparent; border-left: 2px solid transparent;
   cursor: pointer; font: inherit; color: inherit; text-align: left; width: 100%;
 }
@@ -358,7 +376,7 @@ h1, h2, h3 { font-weight: 600; }
 .dminimap .pin {
   position: absolute; left: 50%; top: 50%; width: 10px; height: 10px;
   background: var(--coral); border-radius: 9px; transform: translate(-50%,-50%);
-  box-shadow: 0 0 0 4px rgba(199,91,58,0.25);
+  box-shadow: 0 0 0 4px rgba(37,99,235,0.25);
 }
 .dstats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 16px; }
 .dstat { padding-top: 10px; border-top: 1px solid var(--hair); }
@@ -380,7 +398,7 @@ h1, h2, h3 { font-weight: 600; }
 }
 .ptable .pr {
   font-size: 12.5px; border: 0;
-  border-bottom: 1px solid rgba(230,222,201,0.38);
+  border-bottom: 1px solid rgba(223,227,235,0.55);
   cursor: pointer; background: transparent; border-left: 2px solid transparent;
   font: inherit; text-align: left; width: 100%;
 }
@@ -404,8 +422,8 @@ h1, h2, h3 { font-weight: 600; }
   font-size: 11px; background: var(--card); border: 1px solid var(--hair);
   border-radius: 5px; padding: 3px 8px; color: var(--ink2); font-variant-numeric: tabular-nums;
 }
-.chips .pchip.link { cursor: pointer; color: var(--coral); border-color: rgba(199,91,58,0.3); }
-.chips .pchip.link:hover { background: rgba(199,91,58,0.1); }
+.chips .pchip.link { cursor: pointer; color: var(--coral); border-color: rgba(37,99,235,0.3); }
+.chips .pchip.link:hover { background: rgba(37,99,235,0.1); }
 
 /* ── Boot / error ─────────────────────────────────────────────────────── */
 .loading, .error-box { padding: 28px 22px; color: var(--ink2); font-size: 12px; }

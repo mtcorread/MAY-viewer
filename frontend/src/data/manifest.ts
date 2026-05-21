@@ -67,6 +67,9 @@ export interface Manifest {
     fingerprint: { size: number; mtime: number };
     boundary_fingerprint?: unknown;
   };
+  // False ⇒ world has no geography/latitudes; prep skipped hexbin and
+  // boundaries; the frontend hides the map and renders Inspect only.
+  spatial: boolean;
   schema: WorldSchema;
   geo: GeoBlock;
   artifacts: {
@@ -76,8 +79,8 @@ export interface Manifest {
       venues: DrilldownArtifact;
       members: DrilldownArtifact;
     };
-    hexbin: { path: string; tiles: number; zooms: number[]; layers: string[]; bytes?: number };
-    // Optional: only present when prep was run with --boundary-config.
+    // Both omitted in mapless caches.
+    hexbin?: { path: string; tiles: number; zooms: number[]; layers: string[]; bytes?: number };
     boundaries?: BoundaryArtifact;
   };
   peak_unit_rows: Record<string, number>;
