@@ -146,7 +146,7 @@ h1, h2, h3 { font-weight: 600; }
 
 .gpath { display: flex; flex-direction: column; }
 .crumbrow {
-  display: grid; grid-template-columns: 42px 1fr 12px; align-items: center; gap: 10px;
+  display: grid; grid-template-columns: auto 1fr 12px; align-items: center; gap: 10px;
   padding: 8px 12px; border-radius: 4px; cursor: pointer; margin-bottom: 2px;
   background: transparent; border: 0; border-left: 2px solid transparent;
   text-align: left; font: inherit; color: inherit; width: 100%;
@@ -154,7 +154,7 @@ h1, h2, h3 { font-weight: 600; }
 }
 .crumbrow:hover:not(.on) { background: var(--card); }
 .crumbrow.on { background: var(--cardSel); border-left-color: var(--coral); }
-.crumbrow .tag { font-size: 10px; letter-spacing: 0.12em; color: var(--ink3); text-transform: uppercase; }
+.crumbrow .tag { font-size: 10px; letter-spacing: 0.12em; color: var(--ink3); text-transform: uppercase; white-space: nowrap; }
 .crumbrow .val { font-size: 13px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .crumbrow .val.mono { font-size: 12px; }
 .crumbrow .chev { color: var(--ink3); font-size: 12px; text-align: right; }
@@ -361,6 +361,21 @@ h1, h2, h3 { font-weight: 600; }
 .crow .mt { font-size: 11px; color: var(--ink3); font-variant-numeric: tabular-nums; }
 
 .col-empty { padding: 28px 18px; color: var(--ink3); font-size: 12px; line-height: 1.6; }
+
+/* Pagination footer for the long inspect lists (venues / people / members). */
+.pager {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 10px 16px; border-top: 1px solid var(--hair); background: var(--card);
+  position: sticky; bottom: 0;
+}
+.pgbtn {
+  font: inherit; font-size: 11px; color: var(--ink2);
+  background: var(--paper); border: 1px solid var(--hair); border-radius: 5px;
+  padding: 5px 11px; cursor: pointer; transition: background 0.12s, color 0.12s;
+}
+.pgbtn:hover:not(:disabled) { background: var(--cardSel); color: var(--ink); }
+.pgbtn:disabled { opacity: 0.4; cursor: default; }
+.pgmeta { font-size: 10.5px; letter-spacing: 0.04em; color: var(--ink3); font-variant-numeric: tabular-nums; }
 
 /* ── Inspect · detail column ──────────────────────────────────────────── */
 .dtop { padding: 18px; border-bottom: 1px solid var(--hair); background: var(--card); }

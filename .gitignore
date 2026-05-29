@@ -5,6 +5,7 @@ __pycache__/
 venv/
 *.egg-info/
 .pytest_cache/
+.vscode/
 
 # Generated / large data
 *.h5
@@ -13,8 +14,9 @@ venv/
 *.pmtiles
 *.arrow
 .mayviewer_cache/
+.synth/
 
-# Node / frontend (added in Phase 3)
+# Node / frontend
 node_modules/
 dist/
 .DS_Store

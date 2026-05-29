@@ -212,14 +212,21 @@ domain-specific terms baked in. See **Adding geographic boundaries** and
 **Showing a basemap** above for how to render real shapes and an online
 basemap.
 
-The frontend is a build artifact — build it once:
+The frontend is a build artifact. `mayviewer serve` ships the **compiled**
+bundle from `mayviewer/web/dist` (where `npm run build` writes its output),
+so edits under `frontend/src/` do not appear until you rebuild:
 
 ```bash
 cd frontend && npm install && npm run build
 ```
 
-For UI work, run `mayviewer serve <world>` alongside `npm run dev` in
-`frontend/`.
+For UI work you have two options:
+
+- **Fast iteration:** run `npm run dev` in `frontend/` — Vite serves the
+  source with hot-reload, no rebuild needed (but without `serve`'s
+  Range-capable static server and cache layer).
+- **Production-like:** `npm run build`, then `mayviewer serve <world>` and
+  hard-refresh the browser (Cmd/Ctrl-Shift-R) to bypass cached assets.
 
 ## Dev
 
