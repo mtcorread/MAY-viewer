@@ -26,9 +26,15 @@ export interface GeoBlock {
 }
 
 export interface DrilldownArtifact {
-  path: string;
-  // { "<geo_unit_id>": <row_group_index> } — the O(1) drill-down index.
+  // Static cache only: the Parquet shard path. Absent in a lazy cache.
+  path?: string;
+  // { "<geo_unit_id>": <row_group_index> } — the O(1) drill-down index. In a
+  // lazy cache this is a presence map (value unused): which units have data.
   row_groups: Record<string, number>;
+  // Lazy cache (prep --no-drilldown): read each unit live from the server's
+  // /inspect/<endpoint>/<geo_id>.
+  lazy?: boolean;
+  endpoint?: string; // inspect kind: "people" | "venues" | "members" | "activities"
 }
 
 /** One geo level inside `artifacts.boundaries` (the prep match report). */
@@ -78,6 +84,9 @@ export interface Manifest {
       people: DrilldownArtifact;
       venues: DrilldownArtifact;
       members: DrilldownArtifact;
+      // Per-person activity → venue assignments. Omitted for worlds whose
+      // source .h5 carries no activity map.
+      activities?: DrilldownArtifact;
     };
     // Both omitted in mapless caches.
     hexbin?: { path: string; tiles: number; zooms: number[]; layers: string[]; bytes?: number };

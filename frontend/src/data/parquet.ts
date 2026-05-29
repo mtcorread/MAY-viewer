@@ -87,15 +87,24 @@ export async function readRowGroup(
   );
 }
 
-/** Drill-down for one geo unit: O(1) via the manifest row-group index. */
+/**
+ * Drill-down for one geo unit. Static cache: O(1) row-group read via the
+ * manifest index. Lazy cache (prep --no-drilldown): one fetch of the server's
+ * /inspect endpoint, which reads the unit from the .h5 live.
+ */
 export async function readGeoUnit(
   artifact: DrilldownArtifact,
   geoId: number,
   columns?: string[],
 ): Promise<Row[]> {
-  const idx = artifact.row_groups[String(geoId)];
-  if (idx === undefined) return [];
-  return readRowGroup(artifact.path, idx, columns);
+  // row_groups doubles as the presence gate in both modes.
+  if (artifact.row_groups[String(geoId)] === undefined) return [];
+  if (artifact.lazy) {
+    const r = await fetch(`/inspect/${artifact.endpoint}/${geoId}`);
+    if (!r.ok) return [];
+    return (await r.json()) as Row[];
+  }
+  return readRowGroup(artifact.path!, artifact.row_groups[String(geoId)], columns);
 }
 
 /**

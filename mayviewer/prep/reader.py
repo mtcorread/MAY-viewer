@@ -35,6 +35,21 @@ PARTITIONS: dict[str, str] = {
 
 
 @dataclass(frozen=True)
+class Span:
+    """A contiguous run of geo units coalesced into one bulk read.
+
+    ``start``/``count`` is the single hyperslab to read per dataset; ``units``
+    lists ``(geo_unit_id, local_offset, local_count)`` so each unit's rows are
+    ``block[local_offset:local_offset + local_count]``: read the span once,
+    slice per unit in memory.
+    """
+
+    start: int
+    count: int
+    units: list[tuple[int, int, int]]
+
+
+@dataclass(frozen=True)
 class Partition:
     """One container's CSR geo index. ``bounds(gid)`` is the O(1) slice."""
 
@@ -59,6 +74,29 @@ class Partition:
         for gid, s, c in zip(self.geo_unit_ids, self.start_indices, self.counts):
             yield int(gid), int(s), int(c)
 
+    def spans(self, max_rows: int = 1_000_000):
+        """Yield :class:`Span`s coalescing contiguous non-empty units.
+
+        Consecutive units are merged while their rows stay contiguous in the
+        flat datasets and the running row total stays under ``max_rows``. A gap
+        or the cap starts a new span. Units with count 0 are skipped.
+        """
+        units: list[tuple[int, int, int]] = []
+        start = count = 0
+        for gid, s, c in zip(self.geo_unit_ids, self.start_indices, self.counts):
+            gid, s, c = int(gid), int(s), int(c)
+            if c == 0:
+                continue
+            if units and (s != start + count or count + c > max_rows):
+                yield Span(start, count, units)
+                units = []
+            if not units:
+                start, count = s, 0
+            units.append((gid, count, c))
+            count += c
+        if units:
+            yield Span(start, count, units)
+
     def __len__(self) -> int:
         return len(self.geo_unit_ids)
 
@@ -71,9 +109,14 @@ class Partition:
 class WorldReader:
     """Read-only handle over a MAY world that only ever slices by geo unit."""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, rdcc_nbytes: int = 256 * 1024 * 1024):
         self.path = Path(path)
-        self._f = h5py.File(self.path, "r")
+        # The bulk datasets are gzip+shuffle compressed in 100k-row chunks, read
+        # several at a time. A large chunk cache holds one decompressed chunk per
+        # open dataset as the sweep advances; rdcc_nslots is a prime above the
+        # live-chunk count for good hashing.
+        self._f = h5py.File(self.path, "r",
+                            rdcc_nbytes=rdcc_nbytes, rdcc_nslots=100_003)
         self._parts: dict[str, Partition] = {}
 
     def __enter__(self) -> "WorldReader":

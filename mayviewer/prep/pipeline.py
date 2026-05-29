@@ -44,7 +44,12 @@ def _fingerprint(source: Path) -> dict:
 
 
 def prep(source: str | Path, force: bool = False,
-         boundary_config: str | Path | None = None) -> dict:
+         boundary_config: str | Path | None = None,
+         drilldown: bool = True) -> dict:
+    """Build the viewer cache. With ``drilldown=False`` the per-unit drill-down
+    shards are skipped; the map + aggregates are still built, and the drill-down
+    is recorded as a *lazy* presence index (which units have data), to be served
+    live from the source ``.h5`` by ``mayviewer serve``."""
     source = Path(source).resolve()
     out = cache_dir(source)
     manifest_path = out / "manifest.json"
@@ -61,7 +66,8 @@ def prep(source: str | Path, force: bool = False,
         existing = json.loads(manifest_path.read_text())
         src = existing.get("source", {})
         if (src.get("fingerprint") == _fingerprint(source)
-                and src.get("boundary_fingerprint") == bfp):
+                and src.get("boundary_fingerprint") == bfp
+                and bool(existing.get("drilldown_lazy", False)) == (not drilldown)):
             logger.info("Cache up to date: %s", out)
             return existing
 
@@ -104,10 +110,43 @@ def prep(source: str | Path, force: bool = False,
                 "units": tbl.num_rows,
             }
 
-        logger.info("Drill-down shards...")
-        p_name, p_idx = drilldown.write_people(r, schema, out)
-        v_name, v_idx = drilldown.write_venues(r, schema, out)
-        m_name, m_idx = drilldown.write_members(r, schema, out)
+        has_acts = "activity_mappings/activity_map/activity_data" in r
+        if drilldown:
+            logger.info("Drill-down shards...")
+            p_name, p_idx = drilldown.write_people(r, schema, out)
+            v_name, v_idx, v_meta = drilldown.write_venues(
+                r, schema, out, want_index=has_acts)
+            m_name, m_idx = drilldown.write_members(r, schema, out)
+            dd_art = {
+                "people": {"path": p_name, "row_groups": p_idx},
+                "venues": {"path": v_name, "row_groups": v_idx},
+                "members": {"path": m_name, "row_groups": m_idx},
+            }
+            if has_acts:
+                logger.info("Activity assignments...")
+                a_name, a_idx = drilldown.write_activities(r, schema, out, v_meta)
+                dd_art["activities"] = {"path": a_name, "row_groups": a_idx}
+        else:
+            # Lazy: skip the shards; record which units have data. ``serve``
+            # reads each unit live from the .h5.
+            logger.info("Drill-down: lazy (served live from .h5); indexing units...")
+
+            def _presence(container: str) -> dict:
+                p = r.partition(container)
+                return {int(g): 0 for g, c in zip(p.geo_unit_ids, p.counts)
+                        if int(c) > 0}
+
+            dd_art = {
+                "people": {"lazy": True, "endpoint": "people",
+                           "row_groups": _presence("population")},
+                "venues": {"lazy": True, "endpoint": "venues",
+                           "row_groups": _presence("venues")},
+                "members": {"lazy": True, "endpoint": "members",
+                            "row_groups": _presence("subsets")},
+            }
+            if has_acts:
+                dd_art["activities"] = {"lazy": True, "endpoint": "activities",
+                                        "row_groups": _presence("activity")}
 
         pm_stats: dict | None = None
         if spatial:
@@ -130,11 +169,7 @@ def prep(source: str | Path, force: bool = False,
 
     artifacts: dict = {
         "aggregates": agg_paths,
-        "drilldown": {
-            "people": {"path": p_name, "row_groups": p_idx},
-            "venues": {"path": v_name, "row_groups": v_idx},
-            "members": {"path": m_name, "row_groups": m_idx},
-        },
+        "drilldown": dd_art,
     }
     if pm_stats is not None:
         artifacts["hexbin"] = {"path": "hexbin.pmtiles", **pm_stats}
@@ -150,6 +185,8 @@ def prep(source: str | Path, force: bool = False,
             "boundary_fingerprint": bfp,
         },
         "spatial": spatial,
+        # True ⇒ drill-down shards were not built; serve reads them live.
+        "drilldown_lazy": not drilldown,
         "schema": asdict(schema),
         "geo": {
             "level_values": geo.level_values,

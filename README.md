@@ -25,6 +25,60 @@ mayviewer prep /path/to/world_state.h5
 mayviewer serve /path/to/world_state.h5
 ```
 
+### Running it: local inspection vs. static hosting
+
+`prep` always builds the **map** (`hexbin.pmtiles` + any boundary tiles) and
+the **aggregates** (one small Parquet row per geo unit) — these are cheap and
+needed for the map and stat panels. The expensive, large part is the per-unit
+**drill-down** (people / venues / members / activities). There are two ways to
+serve it, and you pick per use case:
+
+#### Local inspection — fast, reads the `.h5` live (recommended for dev)
+
+Skip the drill-down build entirely; `serve` reads each unit straight from the
+`.h5` the moment you click it. Build is seconds even for a huge world, and the
+cache stays tiny.
+
+```bash
+mayviewer prep  /path/to/world_state.h5 --no-drilldown   # map + aggregates only (fast)
+mayviewer serve /path/to/world_state.h5                  # opens http://127.0.0.1:8000/
+```
+
+The server keeps the `.h5` open and answers `/inspect/<kind>/<geo_id>` on
+demand (one O(1) slice per click). Requirement: the **`.h5` must stay where the
+manifest recorded it** (the path is stored at build time); `serve` warns if it
+can't find it. This is the mode that makes "create a world → look at it
+immediately" instant.
+
+#### Static hosting — a self-contained cache, no `.h5` needed at serve time
+
+Build the full cache (drill-down shards included). The
+`<world-dir>/.mayviewer_cache/<world-stem>/` folder is then self-contained —
+Parquet shards + aggregates + map tiles + `manifest.json` — and the browser
+reads it directly by HTTP range request, so the server is a dumb byte-server.
+
+```bash
+mayviewer prep  /path/to/world_state.h5                  # full build (drill-down shards)
+mayviewer serve /path/to/world_state.h5 --host 0.0.0.0 --port 8000 --no-open
+```
+
+Then either point people at `http://<host>:<port>/`, or drop the cache folder
+behind any Range-capable static host / CDN (S3 + CloudFront, Netlify, nginx, …)
+served at `/cache/`, alongside the built frontend (`mayviewer/web/dist`) and an
+`/app-config.json` (`{"basemap": null}` for no basemap). Visitors need only a
+browser and get no access to the source files.
+
+> **Which mode?** For a department demo you can run *either*: lazy on a machine
+> you can start a process on (best for whole-England — no multi-GB build), or
+> the full static cache if you only have static web space. The full drill-down
+> cache grows with the world (≈ the agent/venue/membership counts; whole-England
+> is multiple GB and a longer build), so for very large worlds prefer lazy on a
+> process-capable host.
+>
+> `prep` is memory-flat and idempotent — re-running on an unchanged world is a
+> no-op; `--force` rebuilds (also needed when switching between full and
+> `--no-drilldown`).
+
 ### Adding geographic boundaries
 
 The default `prep` builds a density-only render (hex tiles, no polygons).

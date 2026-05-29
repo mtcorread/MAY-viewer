@@ -75,6 +75,9 @@ interface State {
   setVenueType: (type: string | null) => void;
   /** Drill into a venue (push onto the nested-venue breadcrumb). */
   openVenue: (id: number) => void;
+  /** Jump straight to a venue's detail, drilling to its home geo unit first
+   *  when it lives outside the current selection (e.g. a work/leisure venue). */
+  gotoVenue: (venueGeoUnitId: number, venueId: number, venueType: string) => Promise<void>;
   /** Truncate the venue breadcrumb to `depth` venues (0 = type's list). */
   venueBackTo: (depth: number) => void;
   inspectPerson: (id: number | null) => void;
@@ -209,6 +212,18 @@ export const useStore = create<State>((set, get) => ({
   setVenueType: (type) => set({ venueType: type, venuePath: [], inspectPersonId: null }),
   openVenue: (id) =>
     set((s) => ({ venuePath: [...s.venuePath, id], inspectPersonId: null })),
+  gotoVenue: async (venueGeoUnitId, venueId, venueType) => {
+    const { selected, manifest, drillToGeo } = get();
+    const leaf = manifest?.geo.leaf_level;
+    // Cross-unit venue → drill the geo selection to its home unit first; the
+    // Inspector then range-reads that unit and resolves the venue locally.
+    if (selected?.geo_id !== venueGeoUnitId && leaf != null) {
+      await drillToGeo(venueGeoUnitId, leaf);
+    }
+    // Set after the (resetting) drill: land on the venue's detail. venuePath
+    // resolves once that unit's venues load — order is safe.
+    set({ mode: "inspect", venueType, venuePath: [venueId], inspectPersonId: null });
+  },
   venueBackTo: (depth) =>
     set((s) => ({ venuePath: s.venuePath.slice(0, depth), inspectPersonId: null })),
   inspectPerson: (id) => set({ inspectPersonId: id }),

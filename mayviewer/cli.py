@@ -37,6 +37,11 @@ def main(argv=None) -> int:
                     help="Optional JSON mapping each geo level to {file, prop, "
                          "strategy} to bake a boundary overlay (see `mayviewer "
                          "match`). Omit for the default shape-less render.")
+    pr.add_argument("--no-drilldown", action="store_true",
+                    help="Skip the per-unit drill-down shards (the slow, large "
+                         "part). Build only the map + aggregates; `serve` then "
+                         "reads drill-down live from the .h5 on click. Fast "
+                         "build + small cache, but serving needs the .h5 present.")
 
     mt = sub.add_parser(
         "match",
@@ -77,15 +82,20 @@ def main(argv=None) -> int:
     if args.cmd == "prep":
         from .prep.pipeline import prep
         m = prep(args.world, force=args.force,
-                 boundary_config=args.boundary_config)
+                 boundary_config=args.boundary_config,
+                 drilldown=not args.no_drilldown)
         a = m["artifacts"]
         print(f"\n✓ cache for {m['source']['name']}")
         for lv, info in sorted(a["aggregates"].items()):
             print(f"  aggregates L{lv} {info['level_name']:6s}: {info['units']:,} units")
         dd = a["drilldown"]
-        print(f"  people  {len(dd['people']['row_groups']):,} units  "
+        kind = "lazy, served from .h5" if m.get("drilldown_lazy") else "shards"
+        print(f"  drill-down ({kind}):  "
+              f"people {len(dd['people']['row_groups']):,} units  "
               f"venues {len(dd['venues']['row_groups']):,}  "
-              f"members {len(dd['members']['row_groups']):,}")
+              f"members {len(dd['members']['row_groups']):,}"
+              + (f"  activities {len(dd['activities']['row_groups']):,}"
+                 if "activities" in dd else ""))
         if "hexbin" in a:
             print(f"  hexbin  {a['hexbin']['tiles']:,} tiles zooms={a['hexbin']['zooms']}")
         else:

@@ -28,6 +28,10 @@ AGE_LABELS = ["0_17", "18_29", "30_44", "45_64", "65_plus"]
 MAX_CATEGORIES = 64
 _SAMPLE = 4000
 
+# Read geo units in coalesced spans (see ``Partition.spans``); caps the rows
+# held in memory at one time.
+_SPAN_ROWS = 250_000
+
 
 def _dec(v) -> str:
     return v.decode() if isinstance(v, bytes) else str(v)
@@ -65,6 +69,7 @@ class _LeafRow:
         self.occ = np.zeros(n_vtype, dtype=np.int64)  # members by venue type
 
     def add_people(self, ages, sexes, prop_slices):
+        # prop_slices values are already-decoded object arrays.
         self.people += len(ages)
         self.sum_age += float(np.nansum(ages))
         idx = np.clip(np.searchsorted(
@@ -76,7 +81,7 @@ class _LeafRow:
                 self.sex[int(code)] += int(cnt)
         for prop, sl in prop_slices.items():
             d = self.prop[prop]
-            cats, cnts = np.unique([_dec(v) for v in sl], return_counts=True)
+            cats, cnts = np.unique(sl, return_counts=True)
             for c, n in zip(cats, cnts):
                 d[c] = d.get(c, 0) + int(n)
 
@@ -97,41 +102,47 @@ def compute(reader, schema, geo) -> tuple[dict[int, "_LeafRow"], list[str]]:
             r = rows[gid] = _LeafRow(n_sex, props, n_vtype)
         return r
 
-    # People.
-    for gid, s, c in reader.partition("population"):
-        if c == 0:
-            continue
-        ages = reader.slice("population/ages", s, c)
-        sexes = reader.slice("population/sexes", s, c)
-        prop_sl = {
-            p: reader.slice(f"population/properties/{p}", s, c) for p in props
+    # People. Read each dataset once per span; decode categorical props once;
+    # slice per unit into add_people.
+    for span in reader.partition("population").spans(_SPAN_ROWS):
+        n = span.count
+        ages = reader.slice("population/ages", span.start, n)
+        sexes = reader.slice("population/sexes", span.start, n)
+        prop_dec = {
+            p: np.array([_dec(v) for v in
+                         reader.slice(f"population/properties/{p}", span.start, n)],
+                        dtype=object)
+            for p in props
         }
-        row(gid).add_people(ages, sexes, prop_sl)
+        for gid, lo, cnt in span.units:
+            hi = lo + cnt
+            row(gid).add_people(ages[lo:hi], sexes[lo:hi],
+                                {p: prop_dec[p][lo:hi] for p in props})
 
     # Venues by type, per leaf, and a vid→type map for occupancy.
     vid_type: dict[int, int] = {}
-    for gid, s, c in reader.partition("venues"):
-        if c == 0:
-            continue
-        vids = reader.slice("venues/ids", s, c)
-        vtys = reader.slice("venues/types", s, c)
-        r = row(gid)
-        for t, n in zip(*np.unique(vtys, return_counts=True)):
-            if 0 <= int(t) < n_vtype:
-                r.vcount[int(t)] += int(n)
+    for span in reader.partition("venues").spans(_SPAN_ROWS):
+        vids = reader.slice("venues/ids", span.start, span.count)
+        vtys = reader.slice("venues/types", span.start, span.count)
         vid_type.update(zip(vids.tolist(), vtys.tolist()))
+        for gid, lo, cnt in span.units:
+            sub = vtys[lo:lo + cnt]
+            r = row(gid)
+            for t, m in zip(*np.unique(sub, return_counts=True)):
+                if 0 <= int(t) < n_vtype:
+                    r.vcount[int(t)] += int(m)
 
     # Occupancy: sum subset member_counts grouped by their venue's type.
-    for gid, s, c in reader.partition("subsets"):
-        if c == 0:
-            continue
-        s_vid = reader.slice("venues/subsets/venue_ids", s, c)
-        s_mc = reader.slice("venues/subsets/member_counts", s, c)
-        r = row(gid)
-        for vid, mc in zip(s_vid.tolist(), s_mc.tolist()):
-            t = vid_type.get(vid)
-            if t is not None:
-                r.occ[t] += int(mc)
+    for span in reader.partition("subsets").spans(_SPAN_ROWS):
+        s_vid = reader.slice("venues/subsets/venue_ids", span.start, span.count)
+        s_mc = reader.slice("venues/subsets/member_counts", span.start, span.count)
+        for gid, lo, cnt in span.units:
+            r = row(gid)
+            for vid, mc in zip(s_vid[lo:lo + cnt].tolist(),
+                               s_mc[lo:lo + cnt].tolist()):
+                t = vid_type.get(vid)
+                if t is not None:
+                    r.occ[t] += int(mc)
 
     return rows, props
 

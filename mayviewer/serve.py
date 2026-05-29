@@ -140,11 +140,67 @@ def _web_root() -> Path:
     return Path(__file__).parent / "web" / "dist"
 
 
+_INSPECT_KINDS = ("people", "venues", "members", "activities")
+
+
+class LazyInspector:
+    """Serves per-unit drill-down read live from the source ``.h5``. Holds one
+    open :class:`WorldReader`, caches per-kind build context on first use, and
+    locks around reads so concurrent requests don't race the single h5py
+    handle."""
+
+    def __init__(self, source: Path):
+        # h5py/pyarrow are imported here, only when a lazy cache is served.
+        from .prep.reader import WorldReader
+        from .schema import describe
+        from .prep import drilldown as dd
+
+        self._dd = dd
+        self._reader = WorldReader(source)
+        self._schema = describe(source)
+        self._lock = threading.Lock()
+        self._ctx: dict[str, object] = {}
+        self._vmeta = None  # venue index for activities, built once on demand
+        self._builders = {
+            "people": dd.people_unit_cols,
+            "venues": dd.venues_unit_cols,
+            "members": dd.members_unit_cols,
+            "activities": dd.activities_unit_cols,
+        }
+
+    def _ctx_for(self, kind: str):
+        ctx = self._ctx.get(kind)
+        if ctx is not None:
+            return ctx
+        dd = self._dd
+        if kind == "activities":
+            if self._vmeta is None:
+                logger.info("  building venue index for activity resolution "
+                            "(one-time)…")
+                self._vmeta = dd.venue_index(self._reader, self._schema)
+            ctx = dd.activities_ctx(self._reader, self._schema, self._vmeta)
+        else:
+            ctx = {"people": dd.people_ctx, "venues": dd.venues_ctx,
+                   "members": dd.members_ctx}[kind](self._reader, self._schema)
+        self._ctx[kind] = ctx
+        return ctx
+
+    def rows(self, kind: str, gid: int) -> list:
+        with self._lock:  # serialize reads on the single h5py handle
+            cols = self._builders[kind](self._reader, self._schema,
+                                        self._ctx_for(kind), gid)
+        return self._dd.unit_records(cols) if cols else []
+
+    def close(self) -> None:
+        self._reader.close()
+
+
 class _Handler(BaseHTTPRequestHandler):
     # Set per-server in serve(); class attributes are fine for a single server.
     cache_root: Path
     web_root: Path
     basemap_spec: dict | None = None
+    inspector: "LazyInspector | None" = None
 
     server_version = "mayviewer/0.1"
     protocol_version = "HTTP/1.1"
@@ -186,7 +242,40 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._serve(head_only=False)
 
+    def _serve_inspect(self, url: str, head_only: bool) -> None:
+        """`/inspect/<kind>/<geo_id>` → JSON rows, read live from the .h5.
+        Only mounted when the cache is lazy and the source .h5 is present."""
+        parts = url.split("/")  # ['', 'inspect', kind, gid]
+        insp = self.inspector
+        if insp is None or len(parts) != 4 or parts[2] not in _INSPECT_KINDS:
+            self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+            return
+        try:
+            gid = int(parts[3])
+        except ValueError:
+            self.send_error(HTTPStatus.BAD_REQUEST, "geo id must be an integer")
+            return
+        try:
+            rows = insp.rows(parts[2], gid)
+        except Exception:
+            logger.exception("inspect %s/%s failed", parts[2], gid)
+            self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "inspect failed")
+            return
+        body = json.dumps(rows).encode()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(body)
+
     def _serve(self, head_only: bool):
+        url0 = self.path.split("?", 1)[0].split("#", 1)[0]
+        if url0.startswith("/inspect/"):
+            self._serve_inspect(url0, head_only)
+            return
         # Tiny runtime config the SPA reads once (like manifest.json — app
         # config, not world data). Reports whether a basemap was opted into.
         if self.path.split("?", 1)[0].split("#", 1)[0] == "/app-config.json":
@@ -287,6 +376,25 @@ def serve(
     _Handler.cache_root = cache
     _Handler.web_root = web
     _Handler.basemap_spec = spec
+
+    # Lazy cache (built with `prep --no-drilldown`): mount the live inspector,
+    # which reads per-unit drill-down from the source .h5 on demand.
+    inspector = None
+    try:
+        manifest = json.loads((cache / "manifest.json").read_text())
+    except (OSError, ValueError):
+        manifest = {}
+    if manifest.get("drilldown_lazy"):
+        src = Path(manifest.get("source", {}).get("path", ""))
+        if src.is_file():
+            inspector = LazyInspector(src)
+            logger.info("  drill-down: lazy — reading %s on demand", src.name)
+        else:
+            logger.warning(
+                "  drill-down is lazy but the source world was not found at %s\n"
+                "  → inspect will be empty. Put the .h5 there, or rebuild the "
+                "cache with `mayviewer prep` (no --no-drilldown).", src)
+    _Handler.inspector = inspector
 
     httpd = _Server((host, port), _Handler)
     url = f"http://{host}:{port}/"

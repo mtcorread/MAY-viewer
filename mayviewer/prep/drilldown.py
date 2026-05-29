@@ -20,13 +20,49 @@ typed-CSR friendships both round-trip without a hardcoded term.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .reader import Span
+
+
+def _json_scalar(v):
+    """numpy scalar -> native Python; NaN -> None (JSON has no NaN)."""
+    if isinstance(v, np.generic):
+        v = v.item()
+    if isinstance(v, float) and math.isnan(v):
+        return None
+    return v
+
+
+def unit_records(cols: dict) -> list[dict]:
+    """Transpose a per-unit column dict (the ``*_unit_cols`` output) into
+    JSON-serializable row records for the lazy-serve endpoint."""
+    keys = list(cols)
+    if not keys:
+        return []
+    n = len(cols[keys[0]])
+    out = []
+    for i in range(n):
+        rec = {}
+        for k in keys:
+            v = cols[k][i]
+            if isinstance(v, (list, np.ndarray)):
+                rec[k] = [_json_scalar(x) for x in v]
+            else:
+                rec[k] = _json_scalar(v)
+        out.append(rec)
+    return out
+
 _SAMPLE = 4000
+
+# Geo units are read in coalesced spans (see ``Partition.spans``). This caps the
+# rows held in memory at one time.
+_SPAN_ROWS = 250_000
 
 
 def _dec(v) -> str:
@@ -122,10 +158,15 @@ def _friend_lists(reader, schema, s: int, c: int) -> dict[str, list[list[int]]]:
     return out
 
 
-def write_people(reader, schema, out_dir: Path) -> tuple[str, dict[int, int]]:
+def people_ctx(reader, schema) -> dict:
+    """Per-build constant state for people shards: property classification, the
+    sex code→label lookup, and the Arrow schema."""
     scalar, jsonish = _classify(reader, schema)
     code_to_sex = {v: k for k, v in schema.sex_mapping.items()}
-
+    # Vectorized code->label via a small lookup array (codes are 0..N small).
+    sex_lut = (np.array([code_to_sex.get(i, str(i))
+                         for i in range(max(code_to_sex) + 1)], dtype=object)
+               if code_to_sex else np.empty(0, dtype=object))
     fields = [
         ("person_id", pa.int64()),
         ("geo_unit_id", pa.int64()),
@@ -136,39 +177,83 @@ def write_people(reader, schema, out_dir: Path) -> tuple[str, dict[int, int]]:
     fields += [(p, pa.list_(pa.int64() if k == "int" else pa.string()))
                for p, k in jsonish.items()]
     fields += [(r, pa.list_(pa.int64())) for r in schema.person_relations]
-    sch = pa.schema(fields)
-    w = _ShardWriter(out_dir / "people.parquet", sch)
+    return {"scalar": scalar, "jsonish": jsonish, "sex_lut": sex_lut,
+            "schema": pa.schema(fields)}
 
-    for gid, s, c in reader.partition("population"):
-        if c == 0:
-            continue
+
+def _people_span(reader, schema, ctx, span: Span):
+    """Yield ``(geo_unit_id, cols)`` for every unit in ``span``: read each
+    dataset once for the whole span, decode/parse once, then slice per unit."""
+    scalar, jsonish, sex_lut = ctx["scalar"], ctx["jsonish"], ctx["sex_lut"]
+    n = span.count
+    ids = reader.slice("population/ids", span.start, n).astype(np.int64)
+    ages = reader.slice("population/ages", span.start, n)
+    sx = reader.slice("population/sexes", span.start, n).astype(np.int64)
+    in_lut = (sx >= 0) & (sx < len(sex_lut))
+    sex_all = np.empty(n, dtype=object)
+    if in_lut.any():
+        sex_all[in_lut] = sex_lut[sx[in_lut]]
+    if not in_lut.all():
+        sex_all[~in_lut] = sx[~in_lut].astype(str)
+    scal_all = {p: [_dec(v) for v in
+                    reader.slice(f"population/properties/{p}", span.start, n)]
+                for p in scalar}
+    json_all = {p: [_to_list(_dec(v), k) for v in
+                    reader.slice(f"population/properties/{p}", span.start, n)]
+                for p, k in jsonish.items()}
+    rel_all = _friend_lists(reader, schema, span.start, n)
+
+    for gid, lo, cnt in span.units:
+        hi = lo + cnt
         cols: dict = {
-            "person_id": reader.slice("population/ids", s, c).astype(np.int64),
-            "geo_unit_id": np.full(c, gid, np.int64),
-            "age": reader.slice("population/ages", s, c),
-            "sex": [code_to_sex.get(int(x), str(int(x)))
-                    for x in reader.slice("population/sexes", s, c)],
+            "person_id": ids[lo:hi],
+            "geo_unit_id": np.full(cnt, gid, np.int64),
+            "age": ages[lo:hi],
+            "sex": sex_all[lo:hi],
         }
         for p in scalar:
-            cols[p] = [_dec(v) for v in
-                       reader.slice(f"population/properties/{p}", s, c)]
-        for p, k in jsonish.items():
-            cols[p] = [_to_list(_dec(v), k) for v in
-                       reader.slice(f"population/properties/{p}", s, c)]
-        cols.update(_friend_lists(reader, schema, s, c))
-        w.write_unit(gid, cols)
+            cols[p] = scal_all[p][lo:hi]
+        for p in jsonish:
+            cols[p] = json_all[p][lo:hi]
+        for rel in schema.person_relations:
+            cols[rel] = rel_all[rel][lo:hi]
+        yield gid, cols
 
+
+def _single_span(reader, container: str, gid: int) -> Span | None:
+    """A one-unit :class:`Span` for an O(1) per-unit (lazy-serve) read."""
+    b = reader.partition(container).bounds(gid)
+    if b is None or b[1] == 0:
+        return None
+    return Span(b[0], b[1], [(int(gid), 0, b[1])])
+
+
+def people_unit_cols(reader, schema, ctx, gid: int) -> dict | None:
+    """One geo unit's people columns (for lazy serve), or None if empty."""
+    sp = _single_span(reader, "population", gid)
+    if sp is None:
+        return None
+    for _, cols in _people_span(reader, schema, ctx, sp):
+        return cols
+    return None
+
+
+def write_people(reader, schema, out_dir: Path) -> tuple[str, dict[int, int]]:
+    ctx = people_ctx(reader, schema)
+    w = _ShardWriter(out_dir / "people.parquet", ctx["schema"])
+    for span in reader.partition("population").spans(_SPAN_ROWS):
+        for gid, cols in _people_span(reader, schema, ctx, span):
+            w.write_unit(gid, cols)
     w.close()
     return w.path.name, w.index
 
 
-def write_venues(reader, schema, out_dir: Path) -> tuple[str, dict[int, int]]:
-    names = reader.names("venues")
+def venues_ctx(reader, schema) -> dict:
+    """Per-build constant state for venue shards (schema, type lookup, which
+    optional columns exist)."""
     vtypes = schema.venue_types
-    # venues/properties/<type>/<prop> arrays are indexed by rank_in_type.
     vprops = schema.venue_properties  # {type: [prop, ...]}
     prop_cols = sorted({f"{t}.{p}" for t, ps in vprops.items() for p in ps})
-
     fields = [
         ("venue_id", pa.int64()),
         ("geo_unit_id", pa.int64()),
@@ -181,64 +266,129 @@ def write_venues(reader, schema, out_dir: Path) -> tuple[str, dict[int, int]]:
         ("rank_in_type", pa.int64()),
     ]
     fields += [(c, pa.string()) for c in prop_cols]
-    sch = pa.schema(fields)
-    w = _ShardWriter(out_dir / "venues.parquet", sch)
+    return {
+        "names": reader.names("venues"),
+        "vtypes": vtypes, "vprops": vprops, "prop_cols": prop_cols,
+        # Older / non-georeferenced worlds may lack is_residence and lat/lon.
+        "has_isres": "venues/is_residence" in reader,
+        "has_vlat": "venues/latitudes" in reader,
+        "has_vlon": "venues/longitudes" in reader,
+        "vt_arr": np.array([*vtypes, ""], dtype=object),  # trailing "" = oor
+        "n_vt": len(vtypes),
+        "schema": pa.schema(fields),
+    }
 
-    # Older / non-georeferenced MAY worlds may lack is_residence and lat/lon.
-    # Treat as null so the cache stays renderable in mapless mode.
-    has_isres = "venues/is_residence" in reader
-    has_vlat = "venues/latitudes" in reader
-    has_vlon = "venues/longitudes" in reader
 
-    for gid, s, c in reader.partition("venues"):
-        if c == 0:
+def _venues_span(reader, schema, ctx, span: Span, vmeta=None):
+    """Yield ``(geo_unit_id, cols)`` for a venue span; when ``vmeta`` is a dict,
+    also fill ``{venue_id: (geo_unit_id, type, name)}`` for the span."""
+    names, vtypes, vprops = ctx["names"], ctx["vtypes"], ctx["vprops"]
+    prop_cols, vt_arr, n_vt = ctx["prop_cols"], ctx["vt_arr"], ctx["n_vt"]
+    has_isres, has_vlat, has_vlon = ctx["has_isres"], ctx["has_vlat"], ctx["has_vlon"]
+    n = span.count
+    vids_all = reader.slice("venues/ids", span.start, n).astype(np.int64)
+    tys_i = reader.slice("venues/types", span.start, n).astype(np.int64)
+    ranks_all = reader.slice("venues/ranks_in_type", span.start, n).astype(np.int64)
+    parent_all = reader.slice("venues/parent_ids", span.start, n).astype(np.int64)
+    isres_all = (reader.slice("venues/is_residence", span.start, n)
+                 if has_isres else None)
+    lat_all = (reader.slice("venues/latitudes", span.start, n)
+               if has_vlat else np.full(n, np.nan, np.float32))
+    lon_all = (reader.slice("venues/longitudes", span.start, n)
+               if has_vlon else np.full(n, np.nan, np.float32))
+
+    toor = (tys_i < 0) | (tys_i >= n_vt)
+    type_all = vt_arr[np.where(toor, n_vt, tys_i)]
+    if toor.any():
+        type_all[toor] = tys_i[toor].astype(str)
+    if names is not None:
+        name_all = [_dec(x) for x in names[span.start:span.start + n]]
+    else:
+        name_all = [str(v) for v in vids_all]
+
+    # Per-type properties (rank_in_type indexed): one sorted fancy read per
+    # (type, prop) for the whole span, scattered back to span positions.
+    prop_span = {col: [None] * n for col in prop_cols}
+    for ti, tname in enumerate(vtypes):
+        sel = np.where(tys_i == ti)[0]
+        if len(sel) == 0:
             continue
-        vids = reader.slice("venues/ids", s, c).astype(np.int64)
-        tys = reader.slice("venues/types", s, c)
-        ranks = reader.slice("venues/ranks_in_type", s, c).astype(np.int64)
+        for prop in vprops.get(tname, []):
+            ds = f"venues/properties/{tname}/{prop}"
+            if ds not in reader:
+                continue
+            rk = ranks_all[sel]
+            order = np.argsort(rk)
+            vals = reader.file[ds][rk[order]]
+            target = prop_span[f"{tname}.{prop}"]
+            for k, oi in enumerate(order):
+                target[int(sel[oi])] = _dec(vals[k])
+
+    if vmeta is not None:
+        gid_all = np.repeat(
+            np.fromiter((u[0] for u in span.units), np.int64, len(span.units)),
+            np.fromiter((u[2] for u in span.units), np.int64, len(span.units)))
+        for i in range(n):
+            vmeta[int(vids_all[i])] = (int(gid_all[i]), type_all[i], name_all[i])
+
+    for gid, lo, cnt in span.units:
+        hi = lo + cnt
         cols: dict = {
-            "venue_id": vids,
-            "geo_unit_id": np.full(c, gid, np.int64),
-            "type": [schema.label_venue_type(int(t)) for t in tys],
-            "name": [_dec(n) for n in names[s:s + c]] if names is not None
-            else [str(v) for v in vids],
-            "parent_id": reader.slice("venues/parent_ids", s, c).astype(np.int64),
-            "is_residence": (reader.slice("venues/is_residence", s, c)
-                             if has_isres else [None] * c),
-            "lat": (reader.slice("venues/latitudes", s, c)
-                    if has_vlat else np.full(c, np.nan, np.float32)),
-            "lon": (reader.slice("venues/longitudes", s, c)
-                    if has_vlon else np.full(c, np.nan, np.float32)),
-            "rank_in_type": ranks,
+            "venue_id": vids_all[lo:hi],
+            "geo_unit_id": np.full(cnt, gid, np.int64),
+            "type": type_all[lo:hi],
+            "name": name_all[lo:hi],
+            "parent_id": parent_all[lo:hi],
+            "is_residence": (isres_all[lo:hi] if has_isres else [None] * cnt),
+            "lat": lat_all[lo:hi],
+            "lon": lon_all[lo:hi],
+            "rank_in_type": ranks_all[lo:hi],
         }
         for col in prop_cols:
-            cols[col] = [None] * c
-        # Attach per-type properties by rank_in_type (scattered, but bounded
-        # to this unit's venues; sorted unique indices keep the h5py read tight).
-        for ti, tname in enumerate(vtypes):
-            sel = np.where(tys == ti)[0]
-            for prop in vprops.get(tname, []):
-                ds = f"venues/properties/{tname}/{prop}"
-                if ds not in reader:
-                    continue
-                rk = ranks[sel]
-                if len(rk) == 0:
-                    continue
-                order = np.argsort(rk)
-                # h5py sorted fancy index: reads only these rows, never the
-                # whole per-type property array (60M-safe).
-                vals = reader.file[ds][rk[order]]
-                colname = f"{tname}.{prop}"
-                target = cols[colname]
-                for k, oi in enumerate(order):
-                    target[int(sel[oi])] = _dec(vals[k])
-        w.write_unit(gid, cols)
+            cols[col] = prop_span[col][lo:hi]
+        yield gid, cols
 
+
+def venues_unit_cols(reader, schema, ctx, gid: int) -> dict | None:
+    """One geo unit's venue columns (for lazy serve), or None if empty."""
+    sp = _single_span(reader, "venues", gid)
+    if sp is None:
+        return None
+    for _, cols in _venues_span(reader, schema, ctx, sp):
+        return cols
+    return None
+
+
+def venue_index(reader, schema) -> dict[int, tuple]:
+    """Build ``{venue_id: (geo_unit_id, type, name)}`` by sweeping venues once.
+    The venue resolver for activity rows in lazy serve. Bounded by venue count."""
+    ctx = venues_ctx(reader, schema)
+    vmeta: dict[int, tuple] = {}
+    for span in reader.partition("venues").spans(_SPAN_ROWS):
+        for _ in _venues_span(reader, schema, ctx, span, vmeta):
+            pass
+    return vmeta
+
+
+def write_venues(
+    reader, schema, out_dir: Path, want_index: bool = False
+) -> tuple[str, dict[int, int], dict[int, tuple] | None]:
+    """Write venues.parquet. When ``want_index`` (only set if the world has an
+    activity map to resolve), also return ``{venue_id: (geo_unit_id, type,
+    name)}`` so activity rows can name and locate each venue without a second
+    pass. The index is bounded by venue count — the same scale already held in
+    the parquet — and is skipped entirely when no activities reference it."""
+    ctx = venues_ctx(reader, schema)
+    vmeta: dict[int, tuple] | None = {} if want_index else None
+    w = _ShardWriter(out_dir / "venues.parquet", ctx["schema"])
+    for span in reader.partition("venues").spans(_SPAN_ROWS):
+        for gid, cols in _venues_span(reader, schema, ctx, span, vmeta):
+            w.write_unit(gid, cols)
     w.close()
-    return w.path.name, w.index
+    return w.path.name, w.index, vmeta
 
 
-def write_members(reader, schema, out_dir: Path) -> tuple[str, dict[int, int]]:
+def members_ctx(reader, schema) -> dict:
     # Authoritative per-subset names. ``metadata/names/subsets`` is a parallel
     # array aligned 1:1 with the subset metadata arrays (same geo-unit sort,
     # same partition index), holding each subset's real name ("Adults",
@@ -246,47 +396,184 @@ def write_members(reader, schema, out_dir: Path) -> tuple[str, dict[int, int]]:
     # (0,1,2…), NOT registry slots, so indexing the global subset_names
     # registry by them mislabels every subset. Use the names array; fall back
     # to the registry-by-index only if a world lacks the names dataset.
-    snames = schema.subset_names
-    has_names = "metadata/names/subsets" in reader
+    return {
+        "snames": schema.subset_names,
+        "has_names": "metadata/names/subsets" in reader,
+        "schema": pa.schema([
+            ("venue_id", pa.int64()),
+            ("geo_unit_id", pa.int64()),
+            ("subset", pa.string()),
+            ("person_id", pa.int64()),
+        ]),
+    }
+
+
+def _members_span(reader, schema, ctx, span: Span):
+    """Yield ``(geo_unit_id, cols)`` for a subsets span, expanding each subset's
+    members from one ``members_flat`` read."""
+    snames, has_names = ctx["snames"], ctx["has_names"]
+    s_vid = reader.slice("venues/subsets/venue_ids", span.start, span.count).astype(np.int64)
+    s_sub = reader.slice("venues/subsets/subset_indices", span.start, span.count)
+    s_off = reader.slice("venues/subsets/members_offsets", span.start, span.count).astype(np.int64)
+    s_cnt = reader.slice("venues/subsets/member_counts", span.start, span.count).astype(np.int64)
+    s_name = (reader.slice("metadata/names/subsets", span.start, span.count)
+              if has_names else None)
+
+    # One members_flat read covering every subset in the span. ``members`` is a
+    # second CSR level under subsets; offsets are absolute, so the span block is
+    # sliced at ``offset - span_lo``.
+    nz = s_cnt > 0
+    if not nz.any():
+        return
+    span_lo = int(s_off[nz].min())
+    span_hi = int((s_off[nz] + s_cnt[nz]).max())
+    blk = reader.slice("venues/subsets/members_flat", span_lo, span_hi - span_lo)
+
+    for gid, lo, ucnt in span.units:
+        uhi = lo + ucnt
+        u_vid, u_sub = s_vid[lo:uhi], s_sub[lo:uhi]
+        u_off, u_cnt = s_off[lo:uhi], s_cnt[lo:uhi]
+        total = int(u_cnt.sum())
+        if total == 0:
+            continue
+        # One label per subset in the unit.
+        if s_name is not None:
+            labels = np.array([_dec(x) for x in s_name[lo:uhi]], dtype=object)
+        else:
+            labels = np.array(
+                [snames[int(si)] if 0 <= int(si) < len(snames) else str(int(si))
+                 for si in u_sub], dtype=object)
+        # Expand each subset's [offset, offset+count) members in one gather.
+        seg_start = np.repeat(u_off - span_lo, u_cnt)
+        within = np.arange(total) - np.repeat(np.cumsum(u_cnt) - u_cnt, u_cnt)
+        yield gid, {
+            "venue_id": np.repeat(u_vid, u_cnt),
+            "geo_unit_id": np.full(total, gid, np.int64),
+            "subset": np.repeat(labels, u_cnt),
+            "person_id": blk[seg_start + within].astype(np.int64),
+        }
+
+
+def members_unit_cols(reader, schema, ctx, gid: int) -> dict | None:
+    """One geo unit's members columns (for lazy serve), or None if empty."""
+    sp = _single_span(reader, "subsets", gid)
+    if sp is None:
+        return None
+    for _, cols in _members_span(reader, schema, ctx, sp):
+        return cols
+    return None
+
+
+def write_members(reader, schema, out_dir: Path) -> tuple[str, dict[int, int]]:
+    ctx = members_ctx(reader, schema)
+    w = _ShardWriter(out_dir / "members.parquet", ctx["schema"])
+    for span in reader.partition("subsets").spans(_SPAN_ROWS):
+        for gid, cols in _members_span(reader, schema, ctx, span):
+            w.write_unit(gid, cols)
+    w.close()
+    return w.path.name, w.index
+
+
+def activities_ctx(reader, schema, vmeta: dict[int, tuple] | None) -> dict:
+    """Per-build state for activity shards. ``vmeta`` (``{venue_id:
+    (geo_unit_id, type, name)}``) is flattened into parallel sorted arrays for
+    venue resolution by ``np.searchsorted``."""
+    anames = schema.activity_names
     sch = pa.schema([
-        ("venue_id", pa.int64()),
-        ("geo_unit_id", pa.int64()),
-        ("subset", pa.string()),
         ("person_id", pa.int64()),
+        ("geo_unit_id", pa.int64()),
+        ("activity", pa.string()),
+        ("venue_id", pa.int64()),
+        ("venue_geo_unit_id", pa.int64()),
+        ("venue_type", pa.string()),
+        ("venue_name", pa.string()),
     ])
-    w = _ShardWriter(out_dir / "members.parquet", sch)
+    ctx = {
+        "n_act": len(anames),
+        # Trailing "" slot is the out-of-range fallback (str(idx) below).
+        "anames_arr": np.array([*anames, ""], dtype=object),
+        "schema": sch,
+    }
+    if vmeta:
+        keys = np.fromiter(vmeta.keys(), np.int64, len(vmeta))
+        order = np.argsort(keys)
+        vvals = list(vmeta.values())
+        ctx["vid_sorted"] = keys[order]
+        ctx["meta_gid"] = np.fromiter((m[0] for m in vvals), np.int64, len(vvals))[order]
+        ctx["meta_type"] = np.array([m[1] for m in vvals], dtype=object)[order]
+        ctx["meta_name"] = np.array([m[2] for m in vvals], dtype=object)[order]
+    else:
+        ctx["vid_sorted"] = np.empty(0, np.int64)
+    return ctx
 
-    members = reader.partition("members")
-    for gid, s, c in reader.partition("subsets"):
-        if c == 0:
-            continue
-        s_vid = reader.slice("venues/subsets/venue_ids", s, c).astype(np.int64)
-        s_sub = reader.slice("venues/subsets/subset_indices", s, c)
-        s_off = reader.slice("venues/subsets/members_offsets", s, c).astype(np.int64)
-        s_cnt = reader.slice("venues/subsets/member_counts", s, c).astype(np.int64)
-        s_name = (reader.slice("metadata/names/subsets", s, c)
-                  if has_names else None)
-        mb = members.bounds(gid)
-        if mb is None:
-            continue
-        m_lo, m_n = mb
-        blk = reader.slice("venues/subsets/members_flat", m_lo, m_n)
-        v_out, g_out, sub_out, p_out = [], [], [], []
-        for k, (vid, si, o, n) in enumerate(zip(s_vid, s_sub, s_off, s_cnt)):
-            rel = int(o) - m_lo
-            mem = blk[rel:rel + int(n)]
-            if s_name is not None:
-                label = _dec(s_name[k])
-            else:
-                label = snames[int(si)] if 0 <= int(si) < len(snames) else str(int(si))
-            v_out.extend([int(vid)] * len(mem))
-            g_out.extend([gid] * len(mem))
-            sub_out.extend([label] * len(mem))
-            p_out.extend(int(x) for x in mem)
-        w.write_unit(gid, {
-            "venue_id": v_out, "geo_unit_id": g_out,
-            "subset": sub_out, "person_id": p_out,
-        })
 
+_ACT_DS = "activity_mappings/activity_map/activity_data"
+
+
+def _activities_span(reader, schema, ctx, span: Span):
+    """Yield ``(geo_unit_id, cols)`` for an activity span, resolving each row's
+    venue through the sorted ``vmeta`` arrays."""
+    n_act, anames_arr, vid_sorted = ctx["n_act"], ctx["anames_arr"], ctx["vid_sorted"]
+    data = reader.slice(_ACT_DS, span.start, span.count)
+    pids = data[:, 0].astype(np.int64)
+    aidx = data[:, 1].astype(np.int64)
+    vids = data[:, 2].astype(np.int64)
+
+    oor = (aidx < 0) | (aidx >= n_act)
+    acts = anames_arr[np.where(oor, n_act, aidx)]
+    if oor.any():  # out-of-range activity index -> its str(index)
+        acts[oor] = aidx[oor].astype(str)
+
+    if len(vid_sorted):
+        pos = np.clip(np.searchsorted(vid_sorted, vids), 0, len(vid_sorted) - 1)
+        hit = vid_sorted[pos] == vids
+        v_gid = np.where(hit, ctx["meta_gid"][pos], -1)
+        v_type = np.where(hit, ctx["meta_type"][pos], "")
+        v_name = np.where(hit, ctx["meta_name"][pos], "")
+    else:  # no venue index — every row is a miss (sentinel/no venue)
+        v_gid = np.full(span.count, -1, np.int64)
+        v_type = np.full(span.count, "", dtype=object)
+        v_name = np.full(span.count, "", dtype=object)
+
+    for gid, lo, cnt in span.units:
+        hi = lo + cnt
+        yield gid, {
+            "person_id": pids[lo:hi],
+            "geo_unit_id": np.full(cnt, gid, np.int64),
+            "activity": acts[lo:hi],
+            "venue_id": vids[lo:hi],
+            "venue_geo_unit_id": v_gid[lo:hi],
+            "venue_type": v_type[lo:hi],
+            "venue_name": v_name[lo:hi],
+        }
+
+
+def activities_unit_cols(reader, schema, ctx, gid: int) -> dict | None:
+    """One geo unit's activity rows (for lazy serve), or None if empty."""
+    sp = _single_span(reader, "activity", gid)
+    if sp is None:
+        return None
+    for _, cols in _activities_span(reader, schema, ctx, sp):
+        return cols
+    return None
+
+
+def write_activities(
+    reader, schema, out_dir: Path, vmeta: dict[int, tuple]
+) -> tuple[str, dict[int, int]]:
+    """Per-person activity → venue assignments, sharded by the person's geo unit.
+
+    The world's ``activity_map`` is a geo-partitioned table of
+    ``[person_id, activity_idx, venue_id, _]`` rows (one block per geo unit,
+    same CSR index as population). Each row is resolved through ``vmeta`` to the
+    venue's home unit / type / name, so the frontend can both *name* an
+    assignment and *navigate* to it even when the venue lives in another unit.
+    Activity labels come from ``schema.activity_names`` — nothing hardcoded.
+    """
+    ctx = activities_ctx(reader, schema, vmeta)
+    w = _ShardWriter(out_dir / "activities.parquet", ctx["schema"])
+    for span in reader.partition("activity").spans(_SPAN_ROWS):
+        for gid, cols in _activities_span(reader, schema, ctx, span):
+            w.write_unit(gid, cols)
     w.close()
     return w.path.name, w.index
