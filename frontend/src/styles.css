@@ -399,6 +399,11 @@ h1, h2, h3 { font-weight: 600; }
 
 /* ── Inspect · detail column ──────────────────────────────────────────── */
 .dtop { padding: 18px; border-bottom: 1px solid var(--hair); background: var(--card); }
+/* The member-composition bars (Sex / Subsets / Ethnicity) reuse `.stats` only
+   for its statsec/statrow layout — but `.stats` is the standalone right panel,
+   so its paper background, left hairline and own scroller paint a mismatched
+   grey inset on the card. Inside `.dtop` they should sit flush on the card. */
+.dtop .stats { background: transparent; border-left: 0; overflow: visible; }
 .dtop .hd { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; }
 .dtop .cap { font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink3); margin: 0; }
 .dtop .ti { font-size: 20px; font-weight: 600; color: var(--ink); margin-top: 4px; line-height: 1.15; letter-spacing: -0.005em; }
