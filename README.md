@@ -8,10 +8,8 @@ data never leaves your machine), **fast at scale** (built to handle millions of 
 and **schema-driven**: level names, venue types, and attribute names are read from
 each world's own metadata, so worlds with different structures all just work.
 
-<p align="center">
-  <img width="500" alt="Map view" src="https://github.com/user-attachments/assets/1ecac625-3271-4ee3-bba1-eb89a97eeb71" />
-  <img width="500" alt="Inspect view" src="https://github.com/user-attachments/assets/47bef233-90e4-4c2d-82da-e5cfe7ef0df6" />
-</p>
+<img width="500" alt="Map view" src="https://github.com/user-attachments/assets/8f24379a-bd69-4b01-809c-ebab5dc630a6" />
+<img width="500" alt="Inspect view" src="https://github.com/user-attachments/assets/78ea9f4e-372d-40d4-9b34-224467341b06" />
 
 ## Features
 
