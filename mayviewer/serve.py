@@ -21,11 +21,13 @@ import logging
 import os
 import re
 import socketserver
+import sys
 import threading
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 logger = logging.getLogger("mayviewer.serve")
 
@@ -149,11 +151,12 @@ class LazyInspector:
     locks around reads so concurrent requests don't race the single h5py
     handle."""
 
-    def __init__(self, source: Path):
+    def __init__(self, source: Path, home_unit_path: Path | None = None):
         # h5py/pyarrow are imported here, only when a lazy cache is served.
         from .prep.reader import WorldReader
         from .schema import describe
         from .prep import drilldown as dd
+        from .prep import personindex
 
         self._dd = dd
         self._reader = WorldReader(source)
@@ -161,6 +164,24 @@ class LazyInspector:
         self._lock = threading.Lock()
         self._ctx: dict[str, object] = {}
         self._vmeta = None  # venue index for activities, built once on demand
+        self._personindex = personindex
+        self._source = Path(source)
+        # person_id -> array row, for resolving venue members by id. Primed in
+        # the background (own file handle, so it never blocks navigation reads)
+        # so the first member resolve is immediate, not a half-second stall.
+        self._person_row = None
+        threading.Thread(target=self._prime_row_index, daemon=True).start()
+        # Per-kind build context (property classification, schemas, and — for
+        # activities — the venue index, a full venue sweep). Built lazily on the
+        # first inspect of each kind, which makes that first click a stall.
+        # Warm them now on a private handle (like the row index) so the first
+        # Inspect of any kind reads only its unit, not the one-time setup.
+        threading.Thread(target=self._prime_contexts, daemon=True).start()
+        # person_id -> home geo unit, memory-mapped (only touched pages resident)
+        # so each member built live can be tagged with the unit whose people
+        # shard the frontend should read to resolve it. Absent on pre-v2 caches.
+        self._home_lut = (personindex.load_home_units(home_unit_path)
+                          if home_unit_path and home_unit_path.is_file() else None)
         self._builders = {
             "people": dd.people_unit_cols,
             "venues": dd.venues_unit_cols,
@@ -179,9 +200,11 @@ class LazyInspector:
                             "(one-time)…")
                 self._vmeta = dd.venue_index(self._reader, self._schema)
             ctx = dd.activities_ctx(self._reader, self._schema, self._vmeta)
+        elif kind == "members":
+            ctx = dd.members_ctx(self._reader, self._schema, self._home_lut)
         else:
-            ctx = {"people": dd.people_ctx, "venues": dd.venues_ctx,
-                   "members": dd.members_ctx}[kind](self._reader, self._schema)
+            ctx = {"people": dd.people_ctx,
+                   "venues": dd.venues_ctx}[kind](self._reader, self._schema)
         self._ctx[kind] = ctx
         return ctx
 
@@ -189,6 +212,77 @@ class LazyInspector:
         with self._lock:  # serialize reads on the single h5py handle
             cols = self._builders[kind](self._reader, self._schema,
                                         self._ctx_for(kind), gid)
+        return self._dd.unit_records(cols) if cols else []
+
+    def _prime_row_index(self) -> None:
+        """Build person_id→row on a private read handle (no lock contention)."""
+        try:
+            from .prep.reader import WorldReader
+            with WorldReader(self._source) as r:
+                idx = self._personindex.build_row_index(r)
+            if self._person_row is None:
+                self._person_row = idx  # benign race: identical array wins
+        except Exception:
+            logger.exception("person row-index prime failed")
+
+    def _prime_contexts(self) -> None:
+        """Pre-build each kind's one-time context on a private handle so the
+        first inspect of any kind is immediate, not a stall. The activity venue
+        index (a full venue sweep) is the costly one, so it — and the activities
+        context — are skipped for worlds with no activity map. Benign races with
+        a concurrent first request: both build identical context, last write
+        wins (same as ``_prime_row_index``)."""
+        try:
+            from .prep.reader import WorldReader
+            dd = self._dd
+            with WorldReader(self._source) as r:
+                if "people" not in self._ctx:
+                    self._ctx["people"] = dd.people_ctx(r, self._schema)
+                if "venues" not in self._ctx:
+                    self._ctx["venues"] = dd.venues_ctx(r, self._schema)
+                if "members" not in self._ctx:
+                    self._ctx["members"] = dd.members_ctx(
+                        r, self._schema, self._home_lut)
+                if self._schema.activity_names:
+                    if self._vmeta is None:
+                        self._vmeta = dd.venue_index(r, self._schema)
+                    if "activities" not in self._ctx:
+                        self._ctx["activities"] = dd.activities_ctx(
+                            r, self._schema, self._vmeta)
+        except Exception:
+            logger.exception("inspector context prime failed")
+
+    def people_by_ids(self, ids: list[int]) -> list:
+        """Resolve people by id in one bounded fancy-read — the fast path that
+        makes a venue's out-of-unit members appear immediately, instead of the
+        frontend fetching every feeder unit whole."""
+        pr = self._person_row
+        with self._lock:  # serialize reads on the single h5py handle
+            if pr is None:  # prime not done yet — build now on the shared handle
+                if self._person_row is None:
+                    logger.info("  building person_id→row index (one-time)…")
+                    self._person_row = self._personindex.build_row_index(self._reader)
+                pr = self._person_row
+            sel = [int(i) for i in ids if 0 <= int(i) < len(pr)]
+            rows = pr[sel] if sel else pr[:0]
+            cols = self._dd.people_by_rows(
+                self._reader, self._schema, self._ctx_for("people"), rows)
+        return self._dd.unit_records(cols) if cols else []
+
+    def activities_by_ids(self, ids: list[int]) -> list:
+        """Resolve people's activities by id (per-person ``activity_offsets``
+        slice), so a venue member's activities show even when they live outside
+        the inspected unit. Builds the venue index once on first use."""
+        pr = self._person_row
+        with self._lock:
+            if pr is None:
+                if self._person_row is None:
+                    self._person_row = self._personindex.build_row_index(self._reader)
+                pr = self._person_row
+            sel = [int(i) for i in ids if 0 <= int(i) < len(pr)]
+            rows = pr[sel] if sel else pr[:0]
+            cols = self._dd.activities_by_rows(
+                self._reader, self._schema, self._ctx_for("activities"), rows)
         return self._dd.unit_records(cols) if cols else []
 
     def close(self) -> None:
@@ -271,8 +365,47 @@ class _Handler(BaseHTTPRequestHandler):
         if not head_only:
             self.wfile.write(body)
 
+    def _serve_by_id(self, kind: str, head_only: bool) -> None:
+        """`/inspect/{people,activities}_by_id?ids=1,2,3` → rows resolved by id in
+        one shot. The fast path for a venue's out-of-unit members (read by id,
+        not by fetching whole feeder units). Only mounted for a lazy cache."""
+        insp = self.inspector
+        if insp is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+            return
+        q = parse_qs(urlparse(self.path).query)
+        raw = q.get("ids", [""])[0]
+        try:
+            ids = [int(x) for x in raw.split(",") if x]
+        except ValueError:
+            self.send_error(HTTPStatus.BAD_REQUEST, "ids must be integers")
+            return
+        resolver = (insp.people_by_ids if kind == "people"
+                    else insp.activities_by_ids)
+        try:
+            rows = resolver(ids)
+        except Exception:
+            logger.exception("%s_by_id failed", kind)
+            self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "resolve failed")
+            return
+        body = json.dumps(rows).encode()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(body)
+
     def _serve(self, head_only: bool):
         url0 = self.path.split("?", 1)[0].split("#", 1)[0]
+        if url0 == "/inspect/people_by_id":
+            self._serve_by_id("people", head_only)
+            return
+        if url0 == "/inspect/activities_by_id":
+            self._serve_by_id("activities", head_only)
+            return
         if url0.startswith("/inspect/"):
             self._serve_inspect(url0, head_only)
             return
@@ -357,6 +490,19 @@ class _Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def handle_error(self, request, client_address):
+        """Swallow the routine connection drops this viewer provokes.
+
+        The browser opens speculative keep-alive connections and aborts in-flight
+        range requests it no longer needs (hyparquet, pmtiles, and the .npy index
+        all issue many, and cancel freely). Each closed/reset socket surfaces in
+        ``http.server``'s read/write loop as a connection error — harmless, so we
+        stay quiet and only let the default handler report anything unexpected.
+        """
+        if isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
 
 def serve(
     path: str | Path,
@@ -387,7 +533,9 @@ def serve(
     if manifest.get("drilldown_lazy"):
         src = Path(manifest.get("source", {}).get("path", ""))
         if src.is_file():
-            inspector = LazyInspector(src)
+            home_rel = manifest.get("person_home_unit")
+            home_path = (cache / home_rel) if home_rel else None
+            inspector = LazyInspector(src, home_path)
             logger.info("  drill-down: lazy — reading %s on demand", src.name)
         else:
             logger.warning(

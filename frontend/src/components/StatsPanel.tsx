@@ -39,14 +39,40 @@ export function StatsPanel() {
   if (loading) return <div className="stats loading pulse">reading aggregate…</div>;
   if (!row) return <div className="stats loading">no aggregate row for this unit</div>;
 
-  const { groups, hasMeanAge } = parseAggregateColumns(Object.keys(row));
-  const people = num(row.people);
-
   return (
     <div className="stats fade-in" key={selected.geo_id}>
+      <UnitStatsBody
+        row={row}
+        levelName={selected.level_name}
+        geoName={selected.geo_name}
+        labels={labels}
+      />
+    </div>
+  );
+}
+
+// The unit's precomputed demographics (population, age, sex, properties, venue
+// types) rendered from one aggregate row. Shared by the Map "Stats" panel and
+// the Inspect cascade so both read identically — and from already-cached data,
+// so it costs no extra fetch in either serving mode.
+export function UnitStatsBody({
+  row,
+  levelName,
+  geoName,
+  labels,
+}: {
+  row: AggRow;
+  levelName: string;
+  geoName: string;
+  labels: Labels;
+}) {
+  const { groups, hasMeanAge } = parseAggregateColumns(Object.keys(row));
+  const people = num(row.people);
+  return (
+    <>
       <div>
         <div className="hero-cap">
-          {selected.level_name} · {selected.geo_name}
+          {levelName} · {geoName}
         </div>
         <div className="hero-num">
           <span className="n">{nf.format(people)}</span>
@@ -56,7 +82,7 @@ export function StatsPanel() {
           <div className="hero-sub">
             mean age <b>{num(row.mean_age).toFixed(1)}</b>
             <span className="dot">·</span>
-            {compact(people)} in {selected.level_name}
+            {compact(people)} in {levelName}
           </div>
         )}
       </div>
@@ -75,7 +101,7 @@ export function StatsPanel() {
           />
         ),
       )}
-    </div>
+    </>
   );
 }
 

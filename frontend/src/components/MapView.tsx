@@ -318,13 +318,11 @@ export function MapView() {
             ? map.queryRenderedFeatures(e.point, { layers: ids })[0]
             : undefined;
         map.getCanvas().style.cursor = hit ? "pointer" : "";
-        if (!hit) {
-          setTip(null);
-          for (const lv of boundaries.levels)
-            if (map.getLayer(`bhov-${lv.level_name}`))
-              map.setFilter(`bhov-${lv.level_name}`, NONE_FILTER);
-          return;
-        }
+        // A transient empty hit usually means the tile under the cursor is
+        // still streaming/overzooming, not that we left the shape. Clearing the
+        // highlight here makes it blink, so keep the last highlight and only
+        // reset on a real mouseout (below).
+        if (!hit) return;
         const p = hit.properties ?? {};
         const gid = Number(p.geo_id);
         const lvl = Number(p.level);
@@ -344,7 +342,12 @@ export function MapView() {
           meanAge: agg && agg.mean_age != null ? num(agg.mean_age) : null,
         });
       });
-      map.on("mouseout", () => setTip(null));
+      map.on("mouseout", () => {
+        setTip(null);
+        for (const lv of boundaries.levels)
+          if (map.getLayer(`bhov-${lv.level_name}`))
+            map.setFilter(`bhov-${lv.level_name}`, NONE_FILTER);
+      });
     }
 
     return () => {

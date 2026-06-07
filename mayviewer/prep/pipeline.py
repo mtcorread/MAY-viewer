@@ -26,12 +26,17 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 from ..schema import describe
-from . import aggregates, drilldown, geo_tree, hexbin, pmtiles
+from . import aggregates, geo_tree, hexbin, personindex, pmtiles
+from . import drilldown as dd  # aliased: ``drilldown`` is also a bool param of prep()
 from .reader import WorldReader
 
 logger = logging.getLogger("mayviewer.prep")
 
-MANIFEST_VERSION = 1
+# v2: members carry ``home_geo_unit`` and the cache ships a person_home_unit
+# index, so venue members living outside the inspected unit resolve. Bumping
+# this invalidates v1 caches (which lack both) so the feature activates on
+# re-prep without a manual --force.
+MANIFEST_VERSION = 2
 
 
 def cache_dir(source: Path) -> Path:
@@ -65,7 +70,8 @@ def prep(source: str | Path, force: bool = False,
     if manifest_path.exists() and not force:
         existing = json.loads(manifest_path.read_text())
         src = existing.get("source", {})
-        if (src.get("fingerprint") == _fingerprint(source)
+        if (existing.get("manifest_version") == MANIFEST_VERSION
+                and src.get("fingerprint") == _fingerprint(source)
                 and src.get("boundary_fingerprint") == bfp
                 and bool(existing.get("drilldown_lazy", False)) == (not drilldown)):
             logger.info("Cache up to date: %s", out)
@@ -110,13 +116,21 @@ def prep(source: str | Path, force: bool = False,
                 "units": tbl.num_rows,
             }
 
+        # person_id -> home geo unit: the join that resolves venue members who
+        # live outside the inspected unit. Built memory-flat for both modes —
+        # baked into member rows here, and memory-mapped live by ``serve`` in
+        # lazy mode (where members are built on demand from the .h5).
+        logger.info("Person home-unit index...")
+        personindex.build_home_units(r, out / personindex.FILENAME)
+        home_lut = personindex.load_home_units(out / personindex.FILENAME)
+
         has_acts = "activity_mappings/activity_map/activity_data" in r
         if drilldown:
             logger.info("Drill-down shards...")
-            p_name, p_idx = drilldown.write_people(r, schema, out)
-            v_name, v_idx, v_meta = drilldown.write_venues(
+            p_name, p_idx = dd.write_people(r, schema, out)
+            v_name, v_idx, v_meta = dd.write_venues(
                 r, schema, out, want_index=has_acts)
-            m_name, m_idx = drilldown.write_members(r, schema, out)
+            m_name, m_idx = dd.write_members(r, schema, out, home_lut)
             dd_art = {
                 "people": {"path": p_name, "row_groups": p_idx},
                 "venues": {"path": v_name, "row_groups": v_idx},
@@ -124,7 +138,7 @@ def prep(source: str | Path, force: bool = False,
             }
             if has_acts:
                 logger.info("Activity assignments...")
-                a_name, a_idx = drilldown.write_activities(r, schema, out, v_meta)
+                a_name, a_idx = dd.write_activities(r, schema, out, v_meta)
                 dd_art["activities"] = {"path": a_name, "row_groups": a_idx}
         else:
             # Lazy: skip the shards; record which units have data. ``serve``
@@ -187,6 +201,10 @@ def prep(source: str | Path, force: bool = False,
         "spatial": spatial,
         # True ⇒ drill-down shards were not built; serve reads them live.
         "drilldown_lazy": not drilldown,
+        # person_id -> home geo unit index (relative to the cache dir). Used by
+        # lazy serve to tag each member with its home unit; ignored by the
+        # static browser path (members carry the tag baked in).
+        "person_home_unit": personindex.FILENAME,
         "schema": asdict(schema),
         "geo": {
             "level_values": geo.level_values,

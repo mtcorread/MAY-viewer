@@ -27,6 +27,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .personindex import home_unit_of
 from .reader import Span
 
 
@@ -238,6 +239,48 @@ def people_unit_cols(reader, schema, ctx, gid: int) -> dict | None:
     return None
 
 
+def people_by_rows(reader, schema, ctx, rows) -> dict | None:
+    """People columns for an arbitrary set of population rows (lazy by-id
+    resolution). ``rows`` are absolute array indices; deduped and sorted here so
+    the h5py fancy reads stay valid (increasing order). Same column shape as a
+    per-unit people shard, so resolved members and the person panel render
+    identically to in-unit people. Returns None if no valid rows."""
+    rows = np.unique(np.asarray(rows, np.int64))
+    rows = rows[rows >= 0]
+    if len(rows) == 0:
+        return None
+    scalar, jsonish, sex_lut = ctx["scalar"], ctx["jsonish"], ctx["sex_lut"]
+    f = reader.file
+    ids = f["population/ids"][rows].astype(np.int64)
+    ages = f["population/ages"][rows]
+    sx = f["population/sexes"][rows].astype(np.int64)
+    geo = f["population/geo_unit_ids"][rows].astype(np.int64)
+    in_lut = (sx >= 0) & (sx < len(sex_lut))
+    sex_all = np.empty(len(rows), dtype=object)
+    if in_lut.any():
+        sex_all[in_lut] = sex_lut[sx[in_lut]]
+    if not in_lut.all():
+        sex_all[~in_lut] = sx[~in_lut].astype(str)
+    cols: dict = {
+        "person_id": ids,
+        "geo_unit_id": geo,
+        "age": ages,
+        "sex": sex_all,
+    }
+    for p in scalar:
+        cols[p] = [_dec(v) for v in f[f"population/properties/{p}"][rows]]
+    for p, k in jsonish.items():
+        cols[p] = [_to_list(_dec(v), k) for v in f[f"population/properties/{p}"][rows]]
+    for rel in schema.person_relations:
+        base = f"population/{rel}"
+        off = f[f"{base}/offsets"][rows].astype(np.int64)
+        cnt = f[f"{base}/counts"][rows].astype(np.int64)
+        flat = f[f"{base}/flat"]
+        cols[rel] = [flat[int(o):int(o) + int(c)].tolist() if c else []
+                     for o, c in zip(off, cnt)]
+    return cols
+
+
 def write_people(reader, schema, out_dir: Path) -> tuple[str, dict[int, int]]:
     ctx = people_ctx(reader, schema)
     w = _ShardWriter(out_dir / "people.parquet", ctx["schema"])
@@ -388,7 +431,7 @@ def write_venues(
     return w.path.name, w.index, vmeta
 
 
-def members_ctx(reader, schema) -> dict:
+def members_ctx(reader, schema, home_lut=None) -> dict:
     # Authoritative per-subset names. ``metadata/names/subsets`` is a parallel
     # array aligned 1:1 with the subset metadata arrays (same geo-unit sort,
     # same partition index), holding each subset's real name ("Adults",
@@ -396,14 +439,21 @@ def members_ctx(reader, schema) -> dict:
     # (0,1,2…), NOT registry slots, so indexing the global subset_names
     # registry by them mislabels every subset. Use the names array; fall back
     # to the registry-by-index only if a world lacks the names dataset.
+    #
+    # ``home_lut`` (person_id -> home geo unit, see :mod:`personindex`) lets each
+    # member carry the unit whose people shard holds its attribute row, so the
+    # frontend can resolve members who live outside the inspected unit. None on
+    # worlds prepped before the index existed → ``home_geo_unit`` is -1.
     return {
         "snames": schema.subset_names,
         "has_names": "metadata/names/subsets" in reader,
+        "home_lut": home_lut,
         "schema": pa.schema([
             ("venue_id", pa.int64()),
             ("geo_unit_id", pa.int64()),
             ("subset", pa.string()),
             ("person_id", pa.int64()),
+            ("home_geo_unit", pa.int64()),
         ]),
     }
 
@@ -411,7 +461,7 @@ def members_ctx(reader, schema) -> dict:
 def _members_span(reader, schema, ctx, span: Span):
     """Yield ``(geo_unit_id, cols)`` for a subsets span, expanding each subset's
     members from one ``members_flat`` read."""
-    snames, has_names = ctx["snames"], ctx["has_names"]
+    snames, has_names, home_lut = ctx["snames"], ctx["has_names"], ctx["home_lut"]
     s_vid = reader.slice("venues/subsets/venue_ids", span.start, span.count).astype(np.int64)
     s_sub = reader.slice("venues/subsets/subset_indices", span.start, span.count)
     s_off = reader.slice("venues/subsets/members_offsets", span.start, span.count).astype(np.int64)
@@ -446,11 +496,18 @@ def _members_span(reader, schema, ctx, span: Span):
         # Expand each subset's [offset, offset+count) members in one gather.
         seg_start = np.repeat(u_off - span_lo, u_cnt)
         within = np.arange(total) - np.repeat(np.cumsum(u_cnt) - u_cnt, u_cnt)
+        pids = blk[seg_start + within].astype(np.int64)
+        # Home unit per member = the unit whose people shard holds the attribute
+        # row. Members living in the inspected unit resolve there already; this
+        # points the frontend at the right shard for everyone else.
+        home = (home_unit_of(home_lut, pids) if home_lut is not None
+                else np.full(total, -1, np.int64))
         yield gid, {
             "venue_id": np.repeat(u_vid, u_cnt),
             "geo_unit_id": np.full(total, gid, np.int64),
             "subset": np.repeat(labels, u_cnt),
-            "person_id": blk[seg_start + within].astype(np.int64),
+            "person_id": pids,
+            "home_geo_unit": home,
         }
 
 
@@ -464,8 +521,9 @@ def members_unit_cols(reader, schema, ctx, gid: int) -> dict | None:
     return None
 
 
-def write_members(reader, schema, out_dir: Path) -> tuple[str, dict[int, int]]:
-    ctx = members_ctx(reader, schema)
+def write_members(reader, schema, out_dir: Path,
+                  home_lut=None) -> tuple[str, dict[int, int]]:
+    ctx = members_ctx(reader, schema, home_lut)
     w = _ShardWriter(out_dir / "members.parquet", ctx["schema"])
     for span in reader.partition("subsets").spans(_SPAN_ROWS):
         for gid, cols in _members_span(reader, schema, ctx, span):
@@ -508,22 +566,16 @@ def activities_ctx(reader, schema, vmeta: dict[int, tuple] | None) -> dict:
 
 
 _ACT_DS = "activity_mappings/activity_map/activity_data"
+_ACT_OFFSETS = "activity_mappings/activity_map/activity_offsets"
 
 
-def _activities_span(reader, schema, ctx, span: Span):
-    """Yield ``(geo_unit_id, cols)`` for an activity span, resolving each row's
-    venue through the sorted ``vmeta`` arrays."""
+def _resolve_acts(ctx, aidx: np.ndarray, vids: np.ndarray):
+    """Activity-name + venue (gid/type/name) for activity rows, via ``vmeta``."""
     n_act, anames_arr, vid_sorted = ctx["n_act"], ctx["anames_arr"], ctx["vid_sorted"]
-    data = reader.slice(_ACT_DS, span.start, span.count)
-    pids = data[:, 0].astype(np.int64)
-    aidx = data[:, 1].astype(np.int64)
-    vids = data[:, 2].astype(np.int64)
-
     oor = (aidx < 0) | (aidx >= n_act)
     acts = anames_arr[np.where(oor, n_act, aidx)]
     if oor.any():  # out-of-range activity index -> its str(index)
         acts[oor] = aidx[oor].astype(str)
-
     if len(vid_sorted):
         pos = np.clip(np.searchsorted(vid_sorted, vids), 0, len(vid_sorted) - 1)
         hit = vid_sorted[pos] == vids
@@ -531,9 +583,67 @@ def _activities_span(reader, schema, ctx, span: Span):
         v_type = np.where(hit, ctx["meta_type"][pos], "")
         v_name = np.where(hit, ctx["meta_name"][pos], "")
     else:  # no venue index — every row is a miss (sentinel/no venue)
-        v_gid = np.full(span.count, -1, np.int64)
-        v_type = np.full(span.count, "", dtype=object)
-        v_name = np.full(span.count, "", dtype=object)
+        v_gid = np.full(len(vids), -1, np.int64)
+        v_type = np.full(len(vids), "", dtype=object)
+        v_name = np.full(len(vids), "", dtype=object)
+    return acts, v_gid, v_type, v_name
+
+
+def activities_by_rows(reader, schema, ctx, rows) -> dict | None:
+    """Resolve activities for an arbitrary set of people (lazy by-id), via the
+    per-person ``activity_offsets`` index — an O(1) slice per person, the same
+    join the reference uses. ``rows`` are population array indices. Returns the
+    activity rows (same shape as the activities shard) for all of them, or None.
+    This is what lets a venue member's activities show even when they live
+    outside the inspected unit (their activities shard is another unit's)."""
+    rows = np.unique(np.asarray(rows, np.int64))
+    rows = rows[rows >= 0]
+    if len(rows) == 0:
+        return None
+    f = reader.file
+    off_ds = f[_ACT_OFFSETS]
+    n = len(off_ds)
+    data_ds = f[_ACT_DS]
+    total = data_ds.shape[0]
+    rows = rows[rows < n]
+    if len(rows) == 0:
+        return None
+    starts = off_ds[rows].astype(np.int64)
+    nxt = rows + 1
+    ends = np.where(nxt < n, off_ds[np.clip(nxt, 0, n - 1)], total).astype(np.int64)
+    # Gather each person's contiguous activity block; tag rows with the owner so
+    # resolution stays vectorized over the concatenation.
+    pid_at_row = f["population/ids"][rows].astype(np.int64)
+    blocks, owners = [], []
+    for owner, s, e in zip(pid_at_row, starts, ends):
+        if e > s:
+            blocks.append(data_ds[s:e])
+            owners.append(np.full(e - s, owner, np.int64))
+    if not blocks:
+        return None
+    data = np.concatenate(blocks)
+    pids = np.concatenate(owners)
+    acts, v_gid, v_type, v_name = _resolve_acts(
+        ctx, data[:, 1].astype(np.int64), data[:, 2].astype(np.int64))
+    return {
+        "person_id": pids,
+        "activity": acts,
+        "venue_id": data[:, 2].astype(np.int64),
+        "venue_geo_unit_id": v_gid,
+        "venue_type": v_type,
+        "venue_name": v_name,
+    }
+
+
+def _activities_span(reader, schema, ctx, span: Span):
+    """Yield ``(geo_unit_id, cols)`` for an activity span, resolving each row's
+    venue through the sorted ``vmeta`` arrays."""
+    data = reader.slice(_ACT_DS, span.start, span.count)
+    pids = data[:, 0].astype(np.int64)
+    aidx = data[:, 1].astype(np.int64)
+    vids = data[:, 2].astype(np.int64)
+
+    acts, v_gid, v_type, v_name = _resolve_acts(ctx, aidx, vids)
 
     for gid, lo, cnt in span.units:
         hi = lo + cnt

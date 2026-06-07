@@ -94,6 +94,10 @@ export interface Manifest {
   };
   peak_unit_rows: Record<string, number>;
   build_seconds: number;
+  // `person_id -> home geo unit` index (a flat .npy), served under /cache and
+  // range-read one element at a time to resolve a person by id (e.g. opening a
+  // network friend who lives in another unit). Present in both serving modes.
+  person_home_unit?: string;
 }
 
 export const CACHE = "/cache";

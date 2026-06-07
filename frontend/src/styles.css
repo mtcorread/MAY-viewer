@@ -328,6 +328,20 @@ h1, h2, h3 { font-weight: 600; }
   background: var(--paper); min-height: 0;
 }
 .col:last-child { border-right: 0; }
+/* Wrapper for the rightmost (detail) column so a back bar can sit above it
+   without disturbing the cascade grid; the inner .col fills the rest. */
+.col-last { display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+.col-last > .col { flex: 1 1 auto; min-height: 0; }
+/* Linear back-stack control: undoes the last inspect step (venue, person, or a
+   cross-unit activity jump) — distinct from the PATH crumbs, which jump up the
+   geography. A full-width header on the detail column you navigated into. */
+.backbar {
+  flex: none; width: 100%; text-align: left; cursor: pointer; font: inherit;
+  display: flex; align-items: center; gap: 6px;
+  padding: 12px 18px; font-size: 12px; font-weight: 600; color: var(--ink2);
+  background: var(--card); border: 0; border-bottom: 1px solid var(--hair);
+}
+.backbar:hover { color: var(--coral); }
 .colhead {
   padding: 14px 18px; border-bottom: 1px solid var(--hair);
   display: flex; align-items: baseline; justify-content: space-between;
@@ -358,7 +372,13 @@ h1, h2, h3 { font-weight: 600; }
 }
 .crow .nm { font-size: 13px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .crow .nm .s2 { display: block; font-size: 10.5px; color: var(--ink3); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; }
+/* Parent-venue line (e.g. the school a classroom belongs to): tighter to its
+   sibling and tinted to read as a "belongs to" relation, not another field. */
+.crow .nm .s2.parent { margin-top: 2px; color: var(--coral); }
 .crow .mt { font-size: 11px; color: var(--ink3); font-variant-numeric: tabular-nums; }
+/* Dropdown child rows (venues under an expanded activity category): indented
+   with a hairline guide; left transparent so the base hover still applies. */
+.crow.sub { padding-left: 44px; border-left-color: var(--hair); }
 
 .col-empty { padding: 28px 18px; color: var(--ink3); font-size: 12px; line-height: 1.6; }
 
@@ -404,12 +424,18 @@ h1, h2, h3 { font-weight: 600; }
 .dsub .m { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink3); }
 
 .ptable { flex: 1; overflow-y: auto; padding-bottom: 12px; }
+/* Inside the venue detail's single scroll region the table is not its own
+   scroller — the whole card (name + stats + members) scrolls as one. */
+.vscroll { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
+.vscroll .ptable { flex: none; overflow: visible; }
 .ptable .ph, .ptable .pr {
   display: grid; gap: 0; padding: 8px 18px; align-items: center;
 }
 .ptable .ph {
   font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink3);
   border-bottom: 1px solid var(--hair);
+  /* Keep the column labels visible while the rest of the card scrolls past. */
+  position: sticky; top: 0; z-index: 1; background: var(--paper);
 }
 .ptable .pr {
   font-size: 12.5px; border: 0;
@@ -439,6 +465,9 @@ h1, h2, h3 { font-weight: 600; }
 }
 .chips .pchip.link { cursor: pointer; color: var(--coral); border-color: rgba(37,99,235,0.3); }
 .chips .pchip.link:hover { background: rgba(37,99,235,0.1); }
+/* A person in another unit: still a link, but dashed to signal that clicking
+   loads (drills to) their home unit rather than opening within this one. */
+.chips .pchip.remote { border-style: dashed; }
 
 /* ── Boot / error ─────────────────────────────────────────────────────── */
 .loading, .error-box { padding: 28px 22px; color: var(--ink2); font-size: 12px; }
