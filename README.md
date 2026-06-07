@@ -1,289 +1,172 @@
 # MAY-viewer
 
-A visualisation tool for [MAY](https://github.com/mtcorread/MAY)
-synthetic-world files. Point it at a `world_state.h5` — from a thousand to
-tens of millions of agents — and explore the world in your browser:
-geography, households and their members, venues, and demographics.
+> Explore [MAY](https://github.com/mtcorread/MAY) synthetic worlds in your browser, from a thousand agents to tens of millions.
 
-**Schema-driven by design.** Geography level names, venue types, subset
-roles and property names are read from each world's own metadata, so worlds
-with different structures all just work. Geographic boundary shapefiles are
-an optional overlay matched by geo code.
+Point MAY-viewer at a `world_state.h5` and explore it interactively: geography,
+households and their members, venues, and demographics. It's **local-first** (your
+data never leaves your machine), **fast at scale** (built to handle millions of agents),
+and **schema-driven**: level names, venue types, and attribute names are read from
+each world's own metadata, so worlds with different structures all just work.
 
-## Usage
+<p align="center">
+  <img width="500" alt="Map view" src="https://github.com/user-attachments/assets/1ecac625-3271-4ee3-bba1-eb89a97eeb71" />
+  <img width="500" alt="Inspect view" src="https://github.com/user-attachments/assets/47bef233-90e4-4c2d-82da-e5cfe7ef0df6" />
+</p>
+
+## Features
+
+- **Map mode**: drill from coarse to fine geography on a real map of boundaries
+  (or a density hexbin view), with live population and demographic stats for the
+  selected region.
+- **Inspect mode**: cascade from a venue category → venue → sub-unit → its
+  members, then open any person's attributes and social graph.
+- **Scales**: precomputed map tiles and per-region aggregates keep huge worlds
+  responsive.
+- **Optional overlays**: bring your own boundary shapefiles, human-readable
+  attribute labels, and an online basemap (OpenStreetMap, Carto, any XYZ tiles).
+
+## Quick start
+
+You'll need **Python ≥ 3.10** and **Node.js ≥ 18**.
 
 ```bash
+# 1. Get the code
+git clone https://github.com/mtcorread/MAY-viewer.git
+cd MAY-viewer
+
+# 2. Install the tool (in an isolated environment)
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 
-# See what a world contains
-mayviewer describe /path/to/world_state.h5
-
-# Build the viewer's cached artifacts
-mayviewer prep /path/to/world_state.h5
-
-# Open the browser viewer (serves what prep built)
-mayviewer serve /path/to/world_state.h5
+# 3. Build the browser app (required, once, plus after pulling new code)
+cd frontend && npm install && npm run build && cd ..
 ```
 
-### Running it: local inspection vs. static hosting
-
-`prep` always builds the **map** (`hexbin.pmtiles` + any boundary tiles) and
-the **aggregates** (one small Parquet row per geo unit) — these are cheap and
-needed for the map and stat panels. The expensive, large part is the per-unit
-**drill-down** (people / venues / members / activities). There are two ways to
-serve it, and you pick per use case:
-
-#### Local inspection — fast, reads the `.h5` live (recommended for dev)
-
-Skip the drill-down build entirely; `serve` reads each unit straight from the
-`.h5` the moment you click it. Build is seconds even for a huge world, and the
-cache stays tiny.
+Then point it at a world file:
 
 ```bash
-mayviewer prep  /path/to/world_state.h5 --no-drilldown   # map + aggregates only (fast)
+mayviewer prep  /path/to/world_state.h5 --no-drilldown   # build map + stats (seconds)
 mayviewer serve /path/to/world_state.h5                  # opens http://127.0.0.1:8000/
 ```
 
-The server keeps the `.h5` open and answers `/inspect/<kind>/<geo_id>` on
-demand (one O(1) slice per click). Requirement: the **`.h5` must stay where the
-manifest recorded it** (the path is stored at build time); `serve` warns if it
-can't find it. This is the mode that makes "create a world → look at it
-immediately" instant.
+`serve` opens your browser automatically. Press `Ctrl`+`C` to stop it.
 
-#### Static hosting — a self-contained cache, no `.h5` needed at serve time
-
-Build the full cache (drill-down shards included). The
-`<world-dir>/.mayviewer_cache/<world-stem>/` folder is then self-contained —
-Parquet shards + aggregates + map tiles + `manifest.json` — and the browser
-reads it directly by HTTP range request, so the server is a dumb byte-server.
+**Coming back later** is just two lines from the project folder, no reinstall:
 
 ```bash
-mayviewer prep  /path/to/world_state.h5                  # full build (drill-down shards)
-mayviewer serve /path/to/world_state.h5 --host 0.0.0.0 --port 8000 --no-open
+source .venv/bin/activate                 # Windows: .\.venv\Scripts\Activate.ps1
+mayviewer serve /path/to/world_state.h5
 ```
 
-Then either point people at `http://<host>:<port>/`, or drop the cache folder
-behind any Range-capable static host / CDN (S3 + CloudFront, Netlify, nginx, …)
-served at `/cache/`, alongside the built frontend (`mayviewer/web/dist`) and an
-`/app-config.json` (`{"basemap": null}` for no basemap). Visitors need only a
-browser and get no access to the source files.
+## Commands
 
-> **Which mode?** For a department demo you can run *either*: lazy on a machine
-> you can start a process on (best for whole-England — no multi-GB build), or
-> the full static cache if you only have static web space. The full drill-down
-> cache grows with the world (≈ the agent/venue/membership counts; whole-England
-> is multiple GB and a longer build), so for very large worlds prefer lazy on a
-> process-capable host.
->
-> `prep` is memory-flat and idempotent — re-running on an unchanged world is a
-> no-op; `--force` rebuilds (also needed when switching between full and
-> `--no-drilldown`).
+| Command | What it does |
+| --- | --- |
+| `mayviewer describe <world.h5>` | Print the world's discovered schema (geo levels, venue types, attribute names). |
+| `mayviewer prep <world.h5>` | Build the cached viewer artifacts. `--no-drilldown` for a fast, tiny build; `--force` to rebuild. |
+| `mayviewer serve <world.h5>` | Serve the viewer in your browser. `--host`/`--port`/`--no-open`/`--basemap` to configure. |
+| `mayviewer match <world.h5> <shapes>` | Diagnose how boundary shapes line up with the world's geo units (read-only). |
 
-### Adding geographic boundaries
+## Two ways to serve
 
-The default `prep` builds a density-only render (hex tiles, no polygons).
-To see real coastlines and admin areas, supply your own boundary
-shapefiles — one GeoJSON per geo level — and point `prep` at a JSON
-config that tells the prepper how to join each file to the world's geo
-codes.
+`prep` always builds the **map** and **aggregates** (cheap, needed for the map and
+stat panels). The expensive part is the per-region **drill-down** (people, venues,
+members). You choose how to serve it:
 
-You bring:
+- **Local inspection** (`prep --no-drilldown`): `serve` reads each region straight
+  from the `.h5` on click. Build takes seconds, the cache stays tiny, and "create a
+  world → look at it immediately" is instant. The `.h5` must stay where `prep`
+  recorded it. *Best for development and large worlds.*
 
-1. A folder of GeoJSON files (any location, any CRS — pyproj reprojects
-   to EPSG:4326). For England/Wales the ONS Open Geography Portal
-   publishes matching files for Regions, LADs, MSOAs and OAs.
-2. A `boundary_config.json` somewhere on disk with one entry per geo
-   level you want overlaid. Shape:
+- **Static hosting** (`prep` with no flag): builds a full, self-contained cache
+  (Parquet shards + tiles + manifest) that the browser reads directly by HTTP range
+  request. No `.h5` needed at serve time, so you can drop the cache folder behind any
+  range-capable static host or CDN. *Best when you only have static web space.* Note
+  the full cache grows with the world (whole-England is multiple GB and a longer build).
 
-   ```json
-   {
-     "levels": {
-       "<LEVEL_NAME>": {
-         "file":     "<path or filename of a GeoJSON>",
-         "prop":     "<feature property to match on>",
-         "strategy": "code" | "name"
-       }
-     }
-   }
-   ```
+`prep` is memory-flat and idempotent: re-running on an unchanged world is a no-op.
+Use `--force` to rebuild (also needed when switching between the two modes).
 
-   - `<LEVEL_NAME>` is one of the levels reported by
-     `mayviewer describe <world.h5>` (e.g. `XLGU`, `LGU`, `MGU`, `SGU`
-     in an ONS-style world — names are world-specific).
-   - `file` is resolved relative to the config file's directory, or
-     absolute.
-   - `prop` is the GeoJSON feature property holding the join key (e.g.
-     `LAD21NM`, `OA21CD`).
-   - `strategy: "code"` matches the world's geo code to `prop` exactly
-     (casefold); `"name"` is loose, punctuation-insensitive.
-   - Levels you omit get no polygons — the world still renders, just
-     without shapes at that level.
+## Configuration
 
-Before baking, sanity-check the join rates:
+### Geographic boundaries: render real coastlines and admin areas
 
-```bash
-mayviewer match /path/to/world_state.h5 /path/to/some_boundaries.geojson
-```
-
-`match` reports per-level matched / total / rate, so you can pick the
-right `prop` and `strategy` before committing to a full prep. The geo
-extras need pyproj + shapely: `pip install -e ".[geo]"`.
-
-Then rebuild the cache with the config:
-
-```bash
-mayviewer prep /path/to/world_state.h5 \
-  --boundary-config /path/to/boundary_config.json
-```
-
-Switching from no-config to with-config (or changing the file) flips the
-cache's `boundary_fingerprint` and triggers a rebuild automatically;
-pass `--force` only if you've edited boundary code without changing the
-config. Bake time is dominated by the finest, largest file — a national
-OA-level file can take 10+ minutes.
-
-### Custom display labels for attribute codes
-
-Worlds typically store demographic attributes as short codes (`W`, `A`,
-`neuro`, `heterosexual`, …). The viewer can show human-readable labels
-instead, driven by a small JSON file you maintain. Labels are optional —
-if the file is missing the UI just shows the raw codes.
-
-Create `labels.json` next to the world's `manifest.json`, inside the
-cache directory:
-
-```
-<world.h5 parent>/.mayviewer_cache/<world_stem>/
-├── manifest.json        ← produced by `prep`
-├── labels.json          ← YOU create this by hand
-├── aggregates/
-└── …
-```
-
-Shape — `field name → raw value → display label`:
+The default `prep` builds a density-only render (hex tiles, no polygons). To overlay
+real shapes, supply one GeoJSON/shapefile per geo level plus a `boundary_config.json`
+that tells `prep` how to join each file to the world's geo codes:
 
 ```json
 {
-  "ethnicity": {
-    "A": "Asian",
-    "B": "Black",
-    "W": "White",
-    "M": "Mixed",
-    "O": "Other"
-  },
-  "sex": { "male": "Male", "female": "Female" },
-  "comorbidities": {
-    "neuro": "Neurological",
-    "cardio": "Cardiovascular",
-    "resp": "Respiratory"
-  },
-  "sexual_orientation": {
-    "heterosexual": "Straight",
-    "homosexual": "Gay/Lesbian"
+  "levels": {
+    "<LEVEL_NAME>": {
+      "file":     "<path or filename of a GeoJSON/shapefile>",
+      "prop":     "<feature property to match on>",
+      "strategy": "code"
+    }
   }
 }
 ```
 
-Notes:
+- `<LEVEL_NAME>` is a level reported by `mayviewer describe` (world-specific).
+- `file` is resolved relative to the config file's directory, or absolute.
+- `prop` is the feature property holding the join key (e.g. `LAD21NM`, `OA21CD`).
+- `strategy: "code"` matches the geo code exactly (casefold); `"name"` is loose,
+  punctuation-insensitive. Omitted levels simply get no polygons.
 
-- Field names match the parquet column names (lowercase, as shown in the
-  Inspector). Run `mayviewer describe <world.h5>` to see them.
-- For list-valued fields (e.g. `comorbidities`), each element is looked
-  up individually and the labels are joined together.
-- Any field or value that isn't in `labels.json` just renders as before.
-- The file is read on page load. Edit it, refresh the browser — no
-  `prep` rerun, no rebuild. `prep` never touches sibling files in the
-  cache directory, so it survives re-prepping.
+Sanity-check join rates before a full build, then bake them in:
 
-Labels apply to person detail attributes in the Inspector and to the
-demographic group bars in the Map mode's Stats panel. Add a top-level
-`venues` map to also relabel venue type names in the Stats panel's
-Venues table.
+```bash
+mayviewer match /path/to/world_state.h5 /path/to/boundaries.geojson   # per-level matched/total/rate
+mayviewer prep  /path/to/world_state.h5 --boundary-config /path/to/boundary_config.json
+```
 
-### Showing a basemap (OpenStreetMap, etc.)
+Geo extras need `pip install -e ".[geo]"`. Changing the config triggers a rebuild
+automatically. For England/Wales, the ONS Open Geography Portal publishes matching
+files; baking a national OA-level file can take 10+ minutes.
 
-The viewer is offline by default — no external tiles are fetched. Pass
-`--basemap` to `serve` to opt in to an online raster basemap behind your
-data:
+### Display labels: show human-readable names for attribute codes
+
+Worlds often store attributes as short codes (`W`, `neuro`, …). Create a `labels.json`
+next to the world's `manifest.json` (inside `.mayviewer_cache/<world_stem>/`) to map
+them to readable labels:
+
+```json
+{
+  "ethnicity": { "A": "Asian", "B": "Black", "W": "White" },
+  "sex": { "male": "Male", "female": "Female" },
+  "comorbidities": { "neuro": "Neurological", "cardio": "Cardiovascular" }
+}
+```
+
+- Field names match the parquet column names (run `mayviewer describe` to see them).
+- List-valued fields (e.g. `comorbidities`) are looked up element by element.
+- Anything not listed renders as its raw code.
+- Read on page load: edit and refresh the browser, no re-`prep` needed.
+- Add a top-level `venues` map to relabel venue type names too.
+
+### Basemap: show OpenStreetMap or other tiles behind your data
+
+The viewer is offline by default. Opt in to an online raster basemap with `--basemap`:
 
 ```bash
 mayviewer serve /path/to/world_state.h5 --basemap osm
 ```
 
-Accepted values:
+Accepts `osm`, `carto-light`, `carto-dark`, or any XYZ template URL
+(`https://tile.example.com/{z}/{x}/{y}.png`). A Layers card in the map lets you
+toggle it off at runtime.
 
-- `osm` — OpenStreetMap standard tiles
-- `carto-light`, `carto-dark` — Carto's positron / dark-matter
-- any XYZ template URL, e.g. `https://tile.example.com/{z}/{x}/{y}.png`
-
-Once enabled, a Layers card in the map gives you a "No basemap" toggle
-to turn it off at runtime.
-
-### See your world on the map, with shapes and OSM
-
-Putting it together for a fresh run:
+## Development
 
 ```bash
-mayviewer prep /path/to/world_state.h5 \
-  --boundary-config /path/to/boundary_config.json
-mayviewer serve /path/to/world_state.h5 --basemap osm
-```
-
-If polygons don't appear, the cache was probably prepped without
-`--boundary-config`; check the manifest in
-`.mayviewer_cache/<stem>/manifest.json` — `artifacts.boundaries` should
-be present and `source.boundary_fingerprint` non-null. Re-run `prep`
-with the config to bake them in.
-
-## The viewer
-
-A warm, single-typeface browser app with a shared header (brand, current
-file, a Map/Inspect switch, and world totals).
-
-- **Map mode** — three panels. On the left, a Geography panel with the
-  selected unit's path, its child units to drill into, and a reference of
-  the dataset's levels. In the centre, a map of real geographic boundaries
-  you click to drill from coarse to fine, with a density view as an
-  alternative. On the right, a Stats panel: total population plus
-  demographic breakdowns for the selected unit. A floating Layers card
-  switches the overlay and basemap, and hovering a region previews its
-  stats. Selecting a region recentres the map on it.
-<p align="center">
-  <img width="500" height="280" alt="map_view" src="https://github.com/user-attachments/assets/1ecac625-3271-4ee3-bba1-eb89a97eeb71" />
-</p>
-
-- **Inspect mode** — a four-column cascade: pick a venue category, then a
-  venue, then a sub-unit, then see its detail. The detail view summarises
-  the venue and lists its members; selecting a person opens their
-  attributes and their social graph, with friends in view clickable.
-<p align="center">
-  <img width="500" height="280" alt="inspect_view" src="https://github.com/user-attachments/assets/47bef233-90e4-4c2d-82da-e5cfe7ef0df6" />
-</p>
-
-
-Every label comes from the world's own metadata, so there are no
-domain-specific terms baked in. See **Adding geographic boundaries** and
-**Showing a basemap** above for how to render real shapes and an online
-basemap.
-
-The frontend is a build artifact. `mayviewer serve` ships the **compiled**
-bundle from `mayviewer/web/dist` (where `npm run build` writes its output),
-so edits under `frontend/src/` do not appear until you rebuild:
-
-```bash
-cd frontend && npm install && npm run build
-```
-
-For UI work you have two options:
-
-- **Fast iteration:** run `npm run dev` in `frontend/` — Vite serves the
-  source with hot-reload, no rebuild needed (but without `serve`'s
-  Range-capable static server and cache layer).
-- **Production-like:** `npm run build`, then `mayviewer serve <world>` and
-  hard-refresh the browser (Cmd/Ctrl-Shift-R) to bypass cached assets.
-
-## Dev
-
-```bash
+# Run the test suite
 python -m pytest -q tests/
+
+# Frontend hot-reload (no rebuild needed, but bypasses serve's cache layer)
+cd frontend && npm run dev
 ```
+
+The frontend is a build artifact: `mayviewer serve` ships the compiled bundle from
+`mayviewer/web/dist`, so edits under `frontend/src/` only appear after
+`npm run build`. After a production build, hard-refresh the browser
+(`Cmd`/`Ctrl`+`Shift`+`R`) to bypass cached assets.
