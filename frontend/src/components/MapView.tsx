@@ -71,6 +71,7 @@ export function MapView() {
     setBasemapOn,
     transitLine,
     transitJourney,
+    transitCompare,
   } = useStore();
   // MapView only mounts in map mode, which the shell hides for mapless
   // caches — hexbin is therefore guaranteed present once `manifest` is set.
@@ -622,11 +623,19 @@ export function MapView() {
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !transit) return;
+    // The highlight covers the active line plus every pinned compare line, so
+    // a shared-ridership comparison shows all its lines lit at once.
+    const selVenues = [
+      ...transitCompare.map((l) => l.venueId),
+      ...(transitLine ? [transitLine.venueId] : []),
+    ];
     const apply = () => {
       if (map.getLayer("transit-sel"))
         map.setFilter(
           "transit-sel",
-          transitLine ? ["==", ["get", "venue_id"], transitLine.venueId] : NO_VENUE,
+          selVenues.length
+            ? ["in", ["get", "venue_id"], ["literal", selVenues]]
+            : NO_VENUE,
         );
       if (map.getLayer("transit-journey"))
         map.setFilter(
@@ -638,7 +647,7 @@ export function MapView() {
     };
     if (map.isStyleLoaded()) apply();
     else map.once("styledata", apply);
-  }, [transit, transitLine, transitJourney]);
+  }, [transit, transitLine, transitJourney, transitCompare]);
 
   // Entering transit mode → frame the whole line network (its PMTiles bounds).
   useEffect(() => {

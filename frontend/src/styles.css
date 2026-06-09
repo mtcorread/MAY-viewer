@@ -273,6 +273,36 @@ h1, h2, h3 { font-weight: 600; }
 .tp-leg-meta { font-size: 11.5px; color: var(--ink2); font-variant-numeric: tabular-nums; }
 .tp-leg-dur { color: var(--ink3); }
 
+/* Pin-to-compare toggle + the shared-ridership compare tray. */
+.tp-pin {
+  margin-top: 12px; padding: 6px 12px; border: 1px solid var(--hair);
+  background: transparent; border-radius: 999px; cursor: pointer;
+  font-size: 12px; font-weight: 600; color: var(--ink2);
+}
+.tp-pin:hover { background: var(--cardSel); color: var(--ink); }
+.tp-pin.on { border-color: #7a4fd0; color: #7a4fd0; }
+
+.tp-compare { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--hair); }
+.tp-clear {
+  border: 0; background: transparent; cursor: pointer; padding: 0;
+  font-size: 11px; color: var(--ink3); text-transform: uppercase; letter-spacing: 0.1em;
+}
+.tp-clear:hover { color: var(--coral); }
+.tp-chips { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 4px; }
+.tp-chip {
+  display: flex; align-items: center; gap: 8px; padding: 5px 8px;
+  background: var(--cardSel); border-radius: 8px; min-width: 0;
+}
+.tp-chip-label {
+  flex: 1; min-width: 0; font-size: 12px; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tp-chip-x {
+  border: 0; background: transparent; cursor: pointer; flex: none;
+  font-size: 15px; line-height: 1; color: var(--ink3); padding: 0 2px;
+}
+.tp-chip-x:hover { color: var(--coral); }
+
 .maptip {
   position: absolute; z-index: 4; padding: 10px 14px; min-width: 180px;
   pointer-events: none;

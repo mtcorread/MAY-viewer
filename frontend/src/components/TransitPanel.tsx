@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useStore } from "../state/store";
+import type { TransitSel } from "../state/store";
+import { TransitArtifact } from "../data/manifest";
 import {
   readRowGroup,
   readGeoUnit,
@@ -12,13 +14,16 @@ import { cell, nf, num } from "../util/format";
 // its riders load here (read by row group from transit_riders.parquet, keyed by
 // the line's venue_id). Pick a rider → their ordered multi-leg journey loads
 // (transit_chains.parquet, keyed by the rider's home geo unit) and the map
-// highlights those legs. Reads are bounded row-group fetches — never whole files.
+// highlights those legs. Pin two or more lines to compare → the panel shows the
+// riders shared across every pinned line (rider-set intersection). Reads are
+// bounded row-group fetches — never whole files.
 
 type Row = Record<string, unknown>;
 const PAGE = 80; // riders per page
 
-// Per-mode accent (matches the map line colors).
+// Per-mode accent (matches the map line colors); shared-ridership uses its own.
 const ACCENT: Record<string, string> = { train: "#e8743b", tube: "#2f6fed" };
+const SHARED_ACCENT = "#7a4fd0";
 
 interface Leg {
   legIdx: number;
@@ -35,6 +40,51 @@ function tmin(min: number): string {
   return Number.isFinite(min) ? `${min}′` : "—";
 }
 
+// Riders shared across every set (rider-set intersection). One set → itself, so
+// the same hook serves a single clicked line and a multi-line comparison.
+function intersectRiders(sets: Row[][]): Row[] {
+  if (!sets.length) return [];
+  if (sets.length === 1) return sets[0];
+  const base = new Map<number, Row>();
+  for (const r of sets[0]) base.set(num(r.person_id), r);
+  for (let i = 1; i < sets.length && base.size; i++) {
+    const ids = new Set(sets[i].map((r) => num(r.person_id)));
+    for (const pid of [...base.keys()]) if (!ids.has(pid)) base.delete(pid);
+  }
+  return [...base.values()];
+}
+
+// Load (and intersect) the rider sets for the given line venues. Each set is one
+// bounded row-group read; `null` while any read is in flight.
+function useRiderRows(transit: TransitArtifact, venueIds: number[]): Row[] | null {
+  const [rows, setRows] = useState<Row[] | null>(null);
+  const key = venueIds.join(",");
+  useEffect(() => {
+    setRows(null);
+    if (!venueIds.length) {
+      setRows([]);
+      return;
+    }
+    let alive = true;
+    void Promise.all(
+      venueIds.map((vid) => {
+        const rg = transit.riders.row_groups[String(vid)];
+        return rg === undefined
+          ? Promise.resolve<Row[]>([])
+          : readRowGroup(transit.riders.path, rg);
+      }),
+    ).then((sets) => {
+      if (alive) setRows(intersectRiders(sets));
+    });
+    return () => {
+      alive = false;
+    };
+    // key captures the venue set; transit is stable for a loaded manifest.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, transit]);
+  return rows;
+}
+
 export function TransitPanel() {
   const {
     manifest,
@@ -42,41 +92,37 @@ export function TransitPanel() {
     transitRider,
     selectTransitRider,
     setTransitJourney,
+    transitCompare,
+    pinTransitLine,
+    unpinTransitLine,
+    clearTransitCompare,
   } = useStore();
   const transit = manifest!.artifacts.transit!;
   const dd = manifest!.artifacts.drilldown;
 
-  const [riders, setRiders] = useState<Row[] | null>(null);
-  const [page, setPage] = useState(0);
-
-  // Load the clicked line's riders (one row-group read).
-  useEffect(() => {
-    setRiders(null);
-    setPage(0);
-    if (!transitLine) return;
-    let alive = true;
-    const rg = transit.riders.row_groups[String(transitLine.venueId)];
-    if (rg === undefined) {
-      setRiders([]);
-      return;
-    }
-    void readRowGroup(transit.riders.path, rg).then((rows) => {
-      if (alive) setRiders(rows);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [transitLine, transit]);
+  // Active (clicked) line riders, and — when 2+ lines are pinned — the riders
+  // shared across the pinned set. Both hooks run every render (hook rules).
+  const activeRiders = useRiderRows(transit, transitLine ? [transitLine.venueId] : []);
+  const compareVenueIds = useMemo(
+    () => transitCompare.map((l) => l.venueId).slice().sort((a, b) => a - b),
+    [transitCompare],
+  );
+  const sharedRiders = useRiderRows(
+    transit,
+    compareVenueIds.length >= 2 ? compareVenueIds : [],
+  );
 
   // home geo unit per rider (carried on the riders row) — used to index the
-  // chains shard and resolve the rider's attribute row.
+  // chains shard and resolve a rider's attribute row, whichever list they came
+  // from.
   const homeByPid = useMemo(() => {
     const m = new Map<number, number>();
-    for (const r of riders ?? []) m.set(num(r.person_id), num(r.home_geo_unit));
+    for (const r of [...(activeRiders ?? []), ...(sharedRiders ?? [])])
+      m.set(num(r.person_id), num(r.home_geo_unit));
     return m;
-  }, [riders]);
+  }, [activeRiders, sharedRiders]);
 
-  if (!transitLine)
+  if (!transitLine && transitCompare.length === 0)
     return (
       <div className="stats">
         <div className="hero-cap">Transit</div>
@@ -89,26 +135,11 @@ export function TransitPanel() {
       </div>
     );
 
-  const accent = ACCENT[transitLine.mode] ?? ACCENT.train;
-  const list = riders ?? [];
-  const pageCount = Math.max(1, Math.ceil(list.length / PAGE));
-  const clamped = Math.min(page, pageCount - 1);
-  const slice = list.slice(clamped * PAGE, clamped * PAGE + PAGE);
-
-  return (
-    <div className="stats fade-in" key={transitLine.venueId}>
-      <div>
-        <div className="hero-cap" style={{ color: accent }}>
-          {humanize(transitLine.mode)} line
-        </div>
-        <div className="ti tp-title">{transitLine.lineId}</div>
-        <div className="hero-sub">
-          <b>{nf.format(transitLine.riderCount)}</b> riders
-          <span className="dot">·</span>venue {transitLine.venueId}
-        </div>
-      </div>
-
-      {transitRider != null ? (
+  // A selected rider's journey takes over the panel, regardless of which list
+  // they were picked from.
+  if (transitRider != null)
+    return (
+      <div className="stats fade-in" key={transitRider}>
         <RiderJourney
           pid={transitRider}
           homeUnit={homeByPid.get(transitRider) ?? -1}
@@ -116,65 +147,198 @@ export function TransitPanel() {
           setJourney={setTransitJourney}
           peopleArt={dd.people}
         />
+      </div>
+    );
+
+  const isPinned =
+    !!transitLine && transitCompare.some((l) => l.venueId === transitLine.venueId);
+
+  return (
+    <div className="stats fade-in">
+      {transitLine && (
+        <ActiveLine
+          line={transitLine}
+          riders={activeRiders}
+          pinned={isPinned}
+          onPin={() => pinTransitLine(transitLine)}
+          onUnpin={() => unpinTransitLine(transitLine.venueId)}
+          onPick={selectTransitRider}
+        />
+      )}
+      {transitCompare.length > 0 && (
+        <CompareTray
+          lines={transitCompare}
+          shared={compareVenueIds.length >= 2 ? sharedRiders : null}
+          onUnpin={unpinTransitLine}
+          onClear={clearTransitCompare}
+          onPick={selectTransitRider}
+        />
+      )}
+    </div>
+  );
+}
+
+// The clicked line: header, a pin/unpin toggle, and its paginated rider list.
+function ActiveLine({
+  line,
+  riders,
+  pinned,
+  onPin,
+  onUnpin,
+  onPick,
+}: {
+  line: TransitSel;
+  riders: Row[] | null;
+  pinned: boolean;
+  onPin: () => void;
+  onUnpin: () => void;
+  onPick: (pid: number) => void;
+}) {
+  const accent = ACCENT[line.mode] ?? ACCENT.train;
+  return (
+    <div key={line.venueId}>
+      <div className="hero-cap" style={{ color: accent }}>
+        {humanize(line.mode)} line
+      </div>
+      <div className="ti tp-title">{line.lineId}</div>
+      <div className="hero-sub">
+        <b>{nf.format(line.riderCount)}</b> riders
+        <span className="dot">·</span>venue {line.venueId}
+      </div>
+      <button
+        className={`tp-pin${pinned ? " on" : ""}`}
+        onClick={pinned ? onUnpin : onPin}
+      >
+        {pinned ? "✓ Pinned — unpin" : "+ Pin to compare"}
+      </button>
+
+      <div className="dsub" style={{ paddingLeft: 0, paddingRight: 0 }}>
+        <span className="t">Riders</span>
+      </div>
+      <RiderList
+        key={line.venueId}
+        rows={riders}
+        accent={accent}
+        onPick={onPick}
+        emptyText="No riders recorded for this line."
+      />
+    </div>
+  );
+}
+
+// The compare tray: pinned-line chips + clear, and (when 2+ pinned) the riders
+// shared across every pinned line.
+function CompareTray({
+  lines,
+  shared,
+  onUnpin,
+  onClear,
+  onPick,
+}: {
+  lines: TransitSel[];
+  shared: Row[] | null;
+  onUnpin: (venueId: number) => void;
+  onClear: () => void;
+  onPick: (pid: number) => void;
+}) {
+  return (
+    <div className="tp-compare">
+      <div className="dsub" style={{ paddingLeft: 0, paddingRight: 0 }}>
+        <span className="t">Compare</span>
+        <button className="tp-clear" onClick={onClear}>
+          clear
+        </button>
+      </div>
+      <div className="tp-chips">
+        {lines.map((l) => (
+          <span className="tp-chip" key={l.venueId} title={l.lineId}>
+            <span className="tp-dot" style={{ background: ACCENT[l.mode] ?? ACCENT.train }} />
+            <span className="tp-chip-label">{l.lineId}</span>
+            <button
+              className="tp-chip-x"
+              onClick={() => onUnpin(l.venueId)}
+              aria-label={`Remove ${l.lineId}`}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+      </div>
+
+      {lines.length < 2 ? (
+        <div className="tp-legend-note">Pin another line to see shared riders.</div>
       ) : (
         <>
           <div className="dsub" style={{ paddingLeft: 0, paddingRight: 0 }}>
-            <span className="t">Riders</span>
+            <span className="t" style={{ color: SHARED_ACCENT }}>
+              Shared riders
+            </span>
             <span className="m">
-              {riders == null
-                ? "reading…"
-                : list.length > PAGE
-                  ? `${nf.format(clamped * PAGE + 1)}–${nf.format(
-                      Math.min((clamped + 1) * PAGE, list.length),
-                    )} of ${nf.format(list.length)}`
-                  : `${nf.format(list.length)} total`}
+              {shared == null ? "reading…" : `${nf.format(shared.length)} on all ${lines.length}`}
             </span>
           </div>
-          {riders == null ? (
-            <div className="col-empty pulse">range-reading row group…</div>
-          ) : (
-            <div className="tp-riders">
-              {slice.map((r) => {
-                const pid = num(r.person_id);
-                return (
-                  <button
-                    key={pid}
-                    className="tp-rider"
-                    onClick={() => selectTransitRider(pid)}
-                  >
-                    <span className="tp-dot" style={{ background: accent }} />
-                    <span className="tp-pid">{pid}</span>
-                    <span className="tp-go">view journey ›</span>
-                  </button>
-                );
-              })}
-              {list.length === 0 && (
-                <div className="col-empty">No riders recorded for this line.</div>
-              )}
-              {pageCount > 1 && (
-                <div className="pager">
-                  <button
-                    className="pgbtn"
-                    disabled={clamped === 0}
-                    onClick={() => setPage(clamped - 1)}
-                  >
-                    ‹ Prev
-                  </button>
-                  <span className="pgmeta">
-                    page {clamped + 1} / {nf.format(pageCount)}
-                  </span>
-                  <button
-                    className="pgbtn"
-                    disabled={clamped >= pageCount - 1}
-                    onClick={() => setPage(clamped + 1)}
-                  >
-                    Next ›
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
+          <RiderList
+            key={lines.map((l) => l.venueId).join(",")}
+            rows={shared}
+            accent={SHARED_ACCENT}
+            onPick={onPick}
+            emptyText="No riders ride all of these lines."
+          />
         </>
+      )}
+    </div>
+  );
+}
+
+// A paginated, clickable rider list. Page state resets when remounted (parents
+// pass a `key` tied to the rider source).
+function RiderList({
+  rows,
+  accent,
+  onPick,
+  emptyText,
+}: {
+  rows: Row[] | null;
+  accent: string;
+  onPick: (pid: number) => void;
+  emptyText: string;
+}) {
+  const [page, setPage] = useState(0);
+  if (rows == null) return <div className="col-empty pulse">range-reading row group…</div>;
+  if (rows.length === 0) return <div className="col-empty">{emptyText}</div>;
+
+  const pageCount = Math.max(1, Math.ceil(rows.length / PAGE));
+  const clamped = Math.min(page, pageCount - 1);
+  const slice = rows.slice(clamped * PAGE, clamped * PAGE + PAGE);
+
+  return (
+    <div className="tp-riders">
+      {slice.map((r) => {
+        const pid = num(r.person_id);
+        return (
+          <button key={pid} className="tp-rider" onClick={() => onPick(pid)}>
+            <span className="tp-dot" style={{ background: accent }} />
+            <span className="tp-pid">{pid}</span>
+            <span className="tp-go">view journey ›</span>
+          </button>
+        );
+      })}
+      {pageCount > 1 && (
+        <div className="pager">
+          <button className="pgbtn" disabled={clamped === 0} onClick={() => setPage(clamped - 1)}>
+            ‹ Prev
+          </button>
+          <span className="pgmeta">
+            page {clamped + 1} / {nf.format(pageCount)}
+          </span>
+          <button
+            className="pgbtn"
+            disabled={clamped >= pageCount - 1}
+            onClick={() => setPage(clamped + 1)}
+          >
+            Next ›
+          </button>
+        </div>
       )}
     </div>
   );
@@ -246,7 +410,7 @@ function RiderJourney({
   return (
     <div className="tp-journey">
       <button className="backbar" onClick={onBack}>
-        ← All riders
+        ← Back
       </button>
       <div className="tp-person">
         <div className="cap">person {pid}</div>
