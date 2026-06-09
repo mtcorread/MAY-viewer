@@ -250,6 +250,9 @@ h1, h2, h3 { font-weight: 600; }
 /* Fills the column; the panel (`.stats`) scrolls as a whole. Page size bounds
    the row count, so no separate inner scroll box is needed. */
 .tp-riders { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+/* Capped only when a candidate line is expanded below the shared list, so the
+   candidate stays reachable; otherwise the list fills the column. */
+.tp-riders.capped { max-height: 300px; overflow-y: auto; }
 .tp-rider {
   display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
   padding: 8px 10px; border: 0; background: transparent; border-radius: 8px;

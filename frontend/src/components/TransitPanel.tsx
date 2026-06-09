@@ -162,6 +162,10 @@ export function TransitPanel() {
         <CompareTray
           lines={transitCompare}
           shared={compareVenueIds.length >= 2 ? sharedRiders : null}
+          // When an unpinned candidate line is expanded below, cap the shared
+          // list so the candidate (and its pin button) stays reachable without a
+          // long scroll. When it's the only list, let it fill the column.
+          capShared={!!transitLine && !isPinned}
           onUnpin={unpinTransitLine}
           onClear={clearTransitCompare}
           onPick={selectTransitRider}
@@ -246,12 +250,14 @@ function ActiveLine({
 function CompareTray({
   lines,
   shared,
+  capShared,
   onUnpin,
   onClear,
   onPick,
 }: {
   lines: TransitSel[];
   shared: Row[] | null;
+  capShared: boolean;
   onUnpin: (venueId: number) => void;
   onClear: () => void;
   onPick: (pid: number) => void;
@@ -296,6 +302,7 @@ function CompareTray({
             key={lines.map((l) => l.venueId).join(",")}
             rows={shared}
             accent={SHARED_ACCENT}
+            capped={capShared}
             onPick={onPick}
             emptyText="No riders ride all of these lines."
           />
@@ -312,11 +319,13 @@ function RiderList({
   accent,
   onPick,
   emptyText,
+  capped = false,
 }: {
   rows: Row[] | null;
   accent: string;
   onPick: (pid: number) => void;
   emptyText: string;
+  capped?: boolean;
 }) {
   const [page, setPage] = useState(0);
   if (rows == null) return <div className="col-empty pulse">range-reading row group…</div>;
@@ -327,7 +336,7 @@ function RiderList({
   const slice = rows.slice(clamped * PAGE, clamped * PAGE + PAGE);
 
   return (
-    <div className="tp-riders">
+    <div className={capped ? "tp-riders capped" : "tp-riders"}>
       {slice.map((r) => {
         const pid = num(r.person_id);
         return (
