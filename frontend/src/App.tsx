@@ -4,10 +4,11 @@ import { compact } from "./util/format";
 import { MapView } from "./components/MapView";
 import { GeoTree } from "./components/GeoTree";
 import { StatsPanel } from "./components/StatsPanel";
+import { TransitPanel } from "./components/TransitPanel";
 import { Inspector } from "./components/Inspector";
 
 export function App() {
-  const { manifest, error, mode, setMode, init } = useStore();
+  const { manifest, error, mode, mapMode, setMode, init } = useStore();
 
   useEffect(() => {
     void init();
@@ -87,7 +88,11 @@ export function App() {
         <>
           <GeoTree />
           <MapView />
-          <StatsPanel />
+          {mapMode === "transit" && manifest.artifacts.transit ? (
+            <TransitPanel />
+          ) : (
+            <StatsPanel />
+          )}
         </>
       ) : mapless ? (
         <>

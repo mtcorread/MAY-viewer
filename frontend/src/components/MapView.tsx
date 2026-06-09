@@ -30,6 +30,23 @@ const CORAL_D = "#1d4ed8";
 const PAPER = "#f4f5f7";
 const NONE_FILTER: maplibregl.FilterSpecification = ["==", ["get", "geo_id"], -1];
 
+// Transit line palette (train vs tube). A white casing under each colored line
+// keeps the network legible over both the paper ground and the OSM basemap.
+const TRAIN = "#e8743b";
+const TUBE = "#2f6fed";
+const LINE_CASING = "#ffffff";
+// Highlight filters key off venue_id (each line feature carries it); -1 selects
+// nothing, the resting state for the hover/selected overlays.
+const NO_VENUE: maplibregl.FilterSpecification = ["==", ["get", "venue_id"], -1];
+// Color a line layer by its mode property.
+const LINE_COLOR: maplibregl.DataDrivenPropertyValueSpecification<string> = [
+  "match",
+  ["get", "mode"],
+  "tube",
+  TUBE,
+  TRAIN, // default (train)
+];
+
 interface Tip {
   x: number;
   y: number;
@@ -52,11 +69,14 @@ export function MapView() {
     basemap,
     basemapOn,
     setBasemapOn,
+    transitLine,
+    transitJourney,
   } = useStore();
   // MapView only mounts in map mode, which the shell hides for mapless
   // caches — hexbin is therefore guaranteed present once `manifest` is set.
   const layers = manifest?.artifacts.hexbin?.layers ?? [];
   const boundaries = manifest?.artifacts.boundaries;
+  const transit = manifest?.artifacts.transit;
   const [domain, setDomain] = useState<[number, number]>([1, 1000]);
   const [tip, setTip] = useState<Tip | null>(null);
 
@@ -191,6 +211,80 @@ export function MapView() {
           },
         );
       }
+    }
+
+    // Transit network: one vector source over the contiguous line pyramid, a
+    // white casing + a mode-colored line, plus hover/selected overlays driven by
+    // venue_id filters (wired to clicks below). All hidden until transit mode.
+    if (transit) {
+      const tAbs = new URL(`${CACHE}/${transit.lines.path}`, location.href).href;
+      const slayer = transit.lines.layer;
+      sources.transit = {
+        type: "vector",
+        tiles: [`pmtiles://${tAbs}/{z}/{x}/{y}`],
+        minzoom: transit.lines.minzoom,
+        maxzoom: transit.lines.maxzoom,
+      };
+      // Zoom-ramped stroke width; `extra` thickens the casing and highlight
+      // strokes uniformly above the base line at every zoom.
+      const lineW = (
+        extra: number,
+      ): maplibregl.DataDrivenPropertyValueSpecification<number> => [
+        "interpolate",
+        ["linear"],
+        ["zoom"],
+        5, 1.1 + extra,
+        9, 2.0 + extra,
+        13, 3.4 + extra,
+        18, 5.5 + extra,
+      ];
+      styleLayers.push(
+        {
+          id: "transit-casing",
+          type: "line",
+          source: "transit",
+          "source-layer": slayer,
+          layout: { visibility: "none", "line-join": "round", "line-cap": "round" },
+          paint: { "line-color": LINE_CASING, "line-opacity": 0.85, "line-width": lineW(2.2) },
+        },
+        {
+          id: "transit-line",
+          type: "line",
+          source: "transit",
+          "source-layer": slayer,
+          layout: { visibility: "none", "line-join": "round", "line-cap": "round" },
+          paint: { "line-color": LINE_COLOR, "line-opacity": 0.9, "line-width": lineW(0) },
+        },
+        {
+          id: "transit-hover",
+          type: "line",
+          source: "transit",
+          "source-layer": slayer,
+          filter: NO_VENUE,
+          layout: { visibility: "none", "line-join": "round", "line-cap": "round" },
+          paint: { "line-color": LINE_COLOR, "line-width": lineW(2.4) },
+        },
+        {
+          id: "transit-sel",
+          type: "line",
+          source: "transit",
+          "source-layer": slayer,
+          filter: NO_VENUE,
+          layout: { visibility: "none", "line-join": "round", "line-cap": "round" },
+          paint: { "line-color": "#111827", "line-width": lineW(3.0) },
+        },
+        {
+          // The selected rider's multi-leg journey: their legs across one or more
+          // lines, drawn bright on top (filter = in [venue_id, …]).
+          id: "transit-journey",
+          type: "line",
+          source: "transit",
+          "source-layer": slayer,
+          filter: NO_VENUE,
+          layout: { visibility: "none", "line-join": "round", "line-cap": "round" },
+          paint: { "line-color": "#f5b301", "line-width": lineW(3.4) },
+        },
+      );
     }
 
     const startMode = useStore.getState().mapMode;
@@ -350,27 +444,70 @@ export function MapView() {
       });
     }
 
+    if (transit) {
+      // Hover: highlight the line under the cursor (its riders/click land in a
+      // later step). queryRenderedFeatures targets the colored line layer; the
+      // overlay is filtered to that feature's venue_id.
+      const clearHover = () => {
+        if (map.getLayer("transit-hover")) map.setFilter("transit-hover", NO_VENUE);
+        map.getCanvas().style.cursor = "";
+      };
+      map.on("mousemove", (e) => {
+        if (useStore.getState().mapMode !== "transit") return;
+        if (!map.getLayer("transit-line")) return;
+        const hit = map.queryRenderedFeatures(e.point, { layers: ["transit-line"] })[0];
+        if (!hit) {
+          clearHover();
+          return;
+        }
+        map.getCanvas().style.cursor = "pointer";
+        const vid = Number(hit.properties?.venue_id);
+        if (Number.isFinite(vid))
+          map.setFilter("transit-hover", ["==", ["get", "venue_id"], vid]);
+      });
+      map.on("mouseout", clearHover);
+      // Click a line → select it (the panel loads its riders). Reads venue_id /
+      // line_id / mode / rider_count straight off the rendered feature.
+      map.on("click", (e) => {
+        if (useStore.getState().mapMode !== "transit") return;
+        if (!map.getLayer("transit-line")) return;
+        const hit = map.queryRenderedFeatures(e.point, { layers: ["transit-line"] })[0];
+        if (!hit) return;
+        const p = hit.properties ?? {};
+        const venueId = Number(p.venue_id);
+        if (!Number.isFinite(venueId)) return;
+        useStore.getState().selectTransitLine({
+          venueId,
+          lineId: String(p.line_id ?? venueId),
+          mode: String(p.mode ?? "train"),
+          riderCount: Number(p.rider_count ?? 0),
+        });
+      });
+    }
+
     return () => {
       map.remove();
       mapRef.current = null;
       maplibregl.removeProtocol("pmtiles");
     };
-  }, [manifest, boundaries]);
+  }, [manifest, boundaries, transit]);
 
-  // Apply the active render mode: layer visibility + zoom constraints.
+  // Apply the active render mode: layer visibility + zoom constraints. The three
+  // overlays are mutually exclusive — only the active mode's layers are shown.
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
     const apply = () => {
       const bnd = mapMode === "boundaries" && !!boundaries;
+      const tr = mapMode === "transit" && !!transit;
       for (const l of layers)
         if (map.getLayer(`hex-${l}`))
           map.setLayoutProperty(
             `hex-${l}`,
             "visibility",
-            !bnd && l === hexLayer ? "visible" : "none",
+            mapMode === "hexbin" && l === hexLayer ? "visible" : "none",
           );
-      if (boundaries) {
+      if (boundaries)
         for (const lv of boundaries.levels)
           for (const pfx of ["bfill", "bhov", "bline", "bsel", "bselline"])
             if (map.getLayer(`${pfx}-${lv.level_name}`))
@@ -379,20 +516,29 @@ export function MapView() {
                 "visibility",
                 bnd ? "visible" : "none",
               );
-        const zs = manifest!.artifacts.hexbin!.zooms;
-        if (bnd) {
-          map.setMinZoom(Math.min(...boundaries.levels.map((l) => l.bake_zoom)));
-          map.setMaxZoom(22);
-        } else {
-          const sorted = [...zs].sort((a, b) => a - b);
-          map.setMinZoom(sorted[Math.min(1, sorted.length - 1)] ?? 0);
-          map.setMaxZoom(Math.max(...zs) + 4);
-        }
+      if (transit)
+        for (const id of [
+          "transit-casing", "transit-line", "transit-hover", "transit-sel", "transit-journey",
+        ])
+          if (map.getLayer(id))
+            map.setLayoutProperty(id, "visibility", tr ? "visible" : "none");
+
+      const zs = manifest!.artifacts.hexbin?.zooms ?? [0];
+      if (tr) {
+        map.setMinZoom(transit.lines.minzoom);
+        map.setMaxZoom(22);
+      } else if (bnd) {
+        map.setMinZoom(Math.min(...boundaries!.levels.map((l) => l.bake_zoom)));
+        map.setMaxZoom(22);
+      } else {
+        const sorted = [...zs].sort((a, b) => a - b);
+        map.setMinZoom(sorted[Math.min(1, sorted.length - 1)] ?? 0);
+        map.setMaxZoom(Math.max(...zs) + 4);
       }
     };
     if (map.isStyleLoaded()) apply();
     else map.once("styledata", apply);
-  }, [mapMode, hexLayer, layers, boundaries, manifest]);
+  }, [mapMode, hexLayer, layers, boundaries, transit, manifest]);
 
   // Basemap on/off (only when the operator opted in).
   useEffect(() => {
@@ -470,7 +616,53 @@ export function MapView() {
     };
   }, [boundaries, selected, mapMode]);
 
+  // Reflect the transit selection onto the map: the selected line (dark stroke)
+  // and the selected rider's journey legs (bright stroke). Both are venue_id
+  // filters on overlay layers already in the style.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !transit) return;
+    const apply = () => {
+      if (map.getLayer("transit-sel"))
+        map.setFilter(
+          "transit-sel",
+          transitLine ? ["==", ["get", "venue_id"], transitLine.venueId] : NO_VENUE,
+        );
+      if (map.getLayer("transit-journey"))
+        map.setFilter(
+          "transit-journey",
+          transitJourney.length
+            ? ["in", ["get", "venue_id"], ["literal", transitJourney]]
+            : NO_VENUE,
+        );
+    };
+    if (map.isStyleLoaded()) apply();
+    else map.once("styledata", apply);
+  }, [transit, transitLine, transitJourney]);
+
+  // Entering transit mode → frame the whole line network (its PMTiles bounds).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !transit || mapMode !== "transit") return;
+    const url = new URL(`${CACHE}/${transit.lines.path}`, location.href).href;
+    let alive = true;
+    void new PMTiles(url).getHeader().then((h) => {
+      if (!alive || !mapRef.current) return;
+      map.fitBounds(
+        [
+          [h.minLon, h.minLat],
+          [h.maxLon, h.maxLat],
+        ],
+        { padding: 48, maxZoom: 9, duration: 500 },
+      );
+    });
+    return () => {
+      alive = false;
+    };
+  }, [transit, mapMode]);
+
   const inBnd = mapMode === "boundaries" && !!boundaries;
+  const inTransit = mapMode === "transit" && !!transit;
   const zoomBy = (d: number) => {
     const m = mapRef.current;
     if (m) m.easeTo({ zoom: m.getZoom() + d, duration: 200 });
@@ -481,9 +673,11 @@ export function MapView() {
       <div ref={ref} style={{ position: "absolute", inset: 0 }} />
 
       <div className="map-hint">
-        {inBnd
-          ? "click a region to drill in · zoom to walk levels"
-          : "density backdrop · navigate the geography in the left panel"}
+        {inTransit
+          ? "train & tube commute lines · hover to highlight a route"
+          : inBnd
+            ? "click a region to drill in · zoom to walk levels"
+            : "density backdrop · navigate the geography in the left panel"}
       </div>
 
       <div className="zoomctl">
@@ -537,10 +731,18 @@ export function MapView() {
           >
             Boundaries
           </button>
+          {transit && (
+            <button
+              className={"chip" + (inTransit ? " on" : "")}
+              onClick={() => setMapMode("transit")}
+            >
+              Transit
+            </button>
+          )}
           {layers.map((l) => (
             <button
               key={l}
-              className={"chip" + (!inBnd && hexLayer === l ? " on" : "")}
+              className={"chip" + (mapMode === "hexbin" && hexLayer === l ? " on" : "")}
               onClick={() => {
                 setMapMode("hexbin");
                 setHexLayer(l);
@@ -550,6 +752,20 @@ export function MapView() {
             </button>
           ))}
         </div>
+
+        {inTransit && transit && (
+          <>
+            <div className="scap">Transit lines</div>
+            <div className="chiprow" style={{ gap: 14 }}>
+              <span className="tlegend">
+                <i style={{ background: TRAIN }} /> train · {transit.summary.train}
+              </span>
+              <span className="tlegend">
+                <i style={{ background: TUBE }} /> tube · {transit.summary.tube}
+              </span>
+            </div>
+          </>
+        )}
 
         <div className="scap">Basemap</div>
         <div className="chiprow" style={{ marginBottom: 0 }}>
@@ -569,11 +785,13 @@ export function MapView() {
         </div>
 
         <div className="foot">
-          <span className="fk">Color by</span>
+          <span className="fk">{inTransit ? "Network" : "Color by"}</span>
           <span className="fv mono">
-            {inBnd
-              ? "people"
-              : `${hexLayer} · ${compact(domain[0])}–${compact(domain[1])}`}
+            {inTransit
+              ? `${transit!.summary.lines} lines · ${compact(transit!.summary.rider_memberships)} riders`
+              : inBnd
+                ? "people"
+                : `${hexLayer} · ${compact(domain[0])}–${compact(domain[1])}`}
           </span>
         </div>
       </div>

@@ -158,6 +158,26 @@ def _multi_geometry(rings_px: list[list[tuple[int, int]]]) -> bytes:
     return bytes(out)
 
 
+def _line_geometry(parts_px: list[list[tuple[int, int]]]) -> bytes:
+    """Encode a (multi)linestring as MVT commands. Each part: MoveTo first
+    vertex, LineTo the rest; the cursor carries across parts."""
+    cmds: list[int] = []
+    cx = cy = 0
+    for part in parts_px:
+        fx, fy = part[0]
+        cmds += [(1 & 0x7) | (1 << 3), _zigzag(fx - cx), _zigzag(fy - cy)]
+        cx, cy = fx, fy
+        rest = part[1:]
+        cmds.append((2 & 0x7) | (len(rest) << 3))
+        for x, y in rest:
+            cmds += [_zigzag(x - cx), _zigzag(y - cy)]
+            cx, cy = x, y
+    out = bytearray()
+    for c in cmds:
+        out += _varint(c)
+    return bytes(out)
+
+
 class _LayerBuilder:
     """Accumulates features for one MVT layer in one tile."""
 
@@ -197,6 +217,21 @@ class _LayerBuilder:
         """A polygon as [exterior, hole, hole, ...] (one MVT polygon)."""
         if rings_px:
             self._emit(rings_px, props)
+
+    def add_line(self, parts_px: list[list[tuple[int, int]]], props: dict) -> None:
+        """A (multi)linestring as one feature: each part is a polyline of >= 2
+        points (MoveTo first vertex, LineTo the rest; no ClosePath)."""
+        parts = [p for p in parts_px if len(p) >= 2]
+        if not parts:
+            return
+        tags: list[int] = []
+        for k, v in props.items():
+            tags += [self._k(k), self._v(v)]
+        body = bytearray()
+        body += _ld(2, b"".join(_varint(t) for t in tags))  # tags (field 2)
+        body += _vfield(3, 2)                                # type = LINESTRING
+        body += _ld(4, _line_geometry(parts))               # geometry (field 4)
+        self._feats.append(bytes(body))
 
     def _emit(self, rings_px: list[list[tuple[int, int]]], props: dict) -> None:
         tags: list[int] = []
@@ -558,4 +593,156 @@ def write_boundary_pmtiles(levels: list[dict], out_path: Path) -> dict:
         "maxzoom": all_max,
         "bytes": out_path.stat().st_size,
         "layers": layer_names,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Transit lines -> PMTiles (LineString layer, per-tile clipped, multi-zoom bake)
+# --------------------------------------------------------------------------- #
+# Bake the lines layer as a CONTIGUOUS zoom pyramid: a single MapLibre vector
+# source covers [minzoom, maxzoom] and requests the tile at every integer zoom
+# in that band, so the zooms must be contiguous (a gap → a blank zoom). Each
+# zoom quantizes geometry to its own tile grid, so a tube line that is a blob at
+# z5 is crisp at z12; MapLibre overzooms above maxzoom to street level. Lines are
+# sparse, so a few extra zoom levels stay cheap. Below minzoom the layer is
+# hidden — fine, since the whole-country view of UK lands around z5-6.
+TRANSIT_MIN_ZOOM = 5
+TRANSIT_MAX_ZOOM = 12
+
+
+def write_transit_pmtiles(lines: list[dict], out_path: Path,
+                          minzoom: int = TRANSIT_MIN_ZOOM,
+                          maxzoom: int = TRANSIT_MAX_ZOOM) -> dict:
+    """Bake train/tube line geometry into one PMTiles ``lines`` layer.
+
+    ``lines`` items: ``{line_id, venue_id, mode, rider_count, coords}`` where
+    ``coords`` is an ordered list of ``(lon, lat)`` stops. Each line is clipped
+    to every tile it crosses at every integer zoom in ``[minzoom, maxzoom]`` and
+    encoded as a LINESTRING, so a long route never ships as one whole-world
+    feature; the click handler reads ``venue_id`` off the rendered feature to
+    fetch that line's riders.
+    """
+    bake_zooms = tuple(range(minzoom, maxzoom + 1))
+    from shapely.geometry import LineString, box  # bake-only dep ([geo] extra)
+
+    LAYER = "lines"
+    tiles: dict[tuple[int, int, int], dict[str, _LayerBuilder]] = {}
+    minlat = minlon = 1e9
+    maxlat = maxlon = -1e9
+    feat_count = 0
+
+    for ln in lines:
+        coords = ln["coords"]
+        if len(coords) < 2:
+            continue
+        ls = LineString(coords)
+        mnx, mny, mxx, mxy = ls.bounds
+        minlon, maxlon = min(minlon, mnx), max(maxlon, mxx)
+        minlat, maxlat = min(minlat, mny), max(maxlat, mxy)
+        props = {
+            "line_id": str(ln["line_id"]),
+            "venue_id": int(ln["venue_id"]),
+            "mode": str(ln["mode"]),
+            "rider_count": int(ln["rider_count"]),
+        }
+        for z in bake_zooms:
+            n = 1 << z
+            tx0 = max(0, int((mnx + 180.0) / 360.0 * n))
+            tx1 = min(n - 1, int((mxx + 180.0) / 360.0 * n))
+            ty0 = max(0, int(_project(0.0, mxy, z)[1] // EXTENT))
+            ty1 = min(n - 1, int(_project(0.0, mny, z)[1] // EXTENT))
+            for tx in range(tx0, tx1 + 1):
+                west = _tilex_to_lon(tx, z)
+                east = _tilex_to_lon(tx + 1, z)
+                for ty in range(ty0, ty1 + 1):
+                    north = _tiley_to_lat(ty, z)
+                    south = _tiley_to_lat(ty + 1, z)
+                    piece = ls.intersection(box(west, south, east, north))
+                    if piece.is_empty:
+                        continue
+                    geoms = (list(piece.geoms)
+                             if piece.geom_type.startswith("Multi")
+                             or piece.geom_type == "GeometryCollection"
+                             else [piece])
+                    ox, oy = tx * EXTENT, ty * EXTENT
+                    parts: list[list[tuple[int, int]]] = []
+                    for g in geoms:
+                        if getattr(g, "geom_type", "") != "LineString" or g.is_empty:
+                            continue
+                        pts = []
+                        for lon, lat in g.coords:
+                            px, py = _project(lon, lat, z)
+                            pts.append((round(px - ox), round(py - oy)))
+                        if len(pts) >= 2:
+                            parts.append(pts)
+                    if not parts:
+                        continue
+                    key = (z, tx, ty)
+                    tl = tiles.setdefault(key, {})
+                    lb = tl.get(LAYER)
+                    if lb is None:
+                        lb = tl[LAYER] = _LayerBuilder(LAYER)
+                    lb.add_line(parts, props)
+                    feat_count += 1
+
+    blobs: list[tuple[int, bytes]] = []
+    for (z, x, y), tl in tiles.items():
+        data = _encode_tile([tl[LAYER]])
+        blobs.append((_zxy_to_tileid(z, x, y), data))
+    blobs.sort(key=lambda t: t[0])
+
+    data_buf = bytearray()
+    entries: list[tuple[int, int, int, int]] = []
+    for tid, blob in blobs:
+        entries.append((tid, len(data_buf), len(blob), 1))
+        data_buf += blob
+
+    zlist = sorted(set(bake_zooms))
+    root_dir = gzip.compress(_serialize_directory(entries))
+    meta = gzip.compress(json.dumps({
+        "vector_layers": [{
+            "id": LAYER,
+            "fields": {"line_id": "String", "venue_id": "Number",
+                       "mode": "String", "rider_count": "Number"},
+            "minzoom": min(zlist), "maxzoom": max(zlist),
+        }],
+        "attribution": "MAY-viewer",
+    }).encode())
+
+    HLEN = 127
+    root_off = HLEN
+    meta_off = root_off + len(root_dir)
+    data_off = meta_off + len(meta)
+    if minlat > maxlat:
+        minlat = maxlat = minlon = maxlon = 0.0
+    header = _header(
+        root_off=root_off, root_len=len(root_dir),
+        meta_off=meta_off, meta_len=len(meta),
+        leaf_off=0, leaf_len=0,
+        data_off=data_off, data_len=len(data_buf),
+        n_addr=len(entries), n_entries=len(entries), n_contents=len(entries),
+        min_zoom=min(zlist), max_zoom=max(zlist),
+        min_lon_e7=int(minlon * 1e7), min_lat_e7=int(minlat * 1e7),
+        max_lon_e7=int(maxlon * 1e7), max_lat_e7=int(maxlat * 1e7),
+        center_zoom=min(zlist),
+        center_lon_e7=int((minlon + maxlon) / 2 * 1e7),
+        center_lat_e7=int((minlat + maxlat) / 2 * 1e7),
+    )
+
+    out_path = Path(out_path)
+    with open(out_path, "wb") as fh:
+        fh.write(header)
+        fh.write(root_dir)
+        fh.write(meta)
+        fh.write(data_buf)
+
+    return {
+        "path": out_path.name,
+        "tiles": len(entries),
+        "features": feat_count,
+        "bake_zooms": zlist,
+        "minzoom": min(zlist),
+        "maxzoom": max(zlist),
+        "bytes": out_path.stat().st_size,
+        "layers": [LAYER],
     }

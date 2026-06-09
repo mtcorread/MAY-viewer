@@ -42,6 +42,13 @@ def main(argv=None) -> int:
                          "part). Build only the map + aggregates; `serve` then "
                          "reads drill-down live from the .h5 on click. Fast "
                          "build + small cache, but serving needs the .h5 present.")
+    pr.add_argument("--transit-geometry", default=None, metavar="PATH",
+                    help="line_stops.csv (ordered stops per line). With "
+                         "--mgu-coords, bakes the transit layer: train/tube line "
+                         "geometry, per-line riders, per-rider leg chains.")
+    pr.add_argument("--mgu-coords", default=None, metavar="PATH",
+                    help="coord_mgu.csv (MGU centroids) — stop coordinates for "
+                         "--transit-geometry. Both flags are given together.")
 
     mt = sub.add_parser(
         "match",
@@ -83,7 +90,9 @@ def main(argv=None) -> int:
         from .prep.pipeline import prep
         m = prep(args.world, force=args.force,
                  boundary_config=args.boundary_config,
-                 drilldown=not args.no_drilldown)
+                 drilldown=not args.no_drilldown,
+                 transit_geometry=args.transit_geometry,
+                 mgu_coords=args.mgu_coords)
         a = m["artifacts"]
         print(f"\n✓ cache for {m['source']['name']}")
         for lv, info in sorted(a["aggregates"].items()):
@@ -108,6 +117,14 @@ def main(argv=None) -> int:
                       f"{lvl['world_units']:<6} {lvl['rate']*100:5.1f}%  "
                       f"z{lvl['bake_zoom']} band {lvl['minzoom']}-{lvl['maxzoom']}"
                       f"  {lvl['strategy']}:{lvl['prop']}")
+        if "transit" in a:
+            t = a["transit"]
+            s = t["summary"]
+            print(f"  transit {s['lines']:,} lines "
+                  f"(train {s['train']:,}, tube {s['tube']:,})  "
+                  f"{t['lines']['tiles']:,} tiles  "
+                  f"{s['rider_memberships']:,} riderships  "
+                  f"{s['riders_with_chains']:,} riders w/ chains")
         print(f"  peak unit rows: {m['peak_unit_rows']}  ({m['build_seconds']}s)")
         return 0
 
