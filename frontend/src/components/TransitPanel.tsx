@@ -155,16 +155,9 @@ export function TransitPanel() {
 
   return (
     <div className="stats fade-in">
-      {transitLine && (
-        <ActiveLine
-          line={transitLine}
-          riders={activeRiders}
-          pinned={isPinned}
-          onPin={() => pinTransitLine(transitLine)}
-          onUnpin={() => unpinTransitLine(transitLine.venueId)}
-          onPick={selectTransitRider}
-        />
-      )}
+      {/* The comparison is the standing result, so it sits on top — pinning the
+          second line surfaces it immediately, with no further clicks. The active
+          (clicked) line follows below for continued exploration. */}
       {transitCompare.length > 0 && (
         <CompareTray
           lines={transitCompare}
@@ -174,15 +167,32 @@ export function TransitPanel() {
           onPick={selectTransitRider}
         />
       )}
+      {transitLine && (
+        <ActiveLine
+          line={transitLine}
+          riders={activeRiders}
+          pinned={isPinned}
+          // A pinned line's individual riders add nothing the comparison doesn't
+          // already show, so collapse them; an unpinned line stays expanded so
+          // its riders can be evaluated before pinning.
+          collapsed={isPinned && transitCompare.length > 0}
+          onPin={() => pinTransitLine(transitLine)}
+          onUnpin={() => unpinTransitLine(transitLine.venueId)}
+          onPick={selectTransitRider}
+        />
+      )}
     </div>
   );
 }
 
-// The clicked line: header, a pin/unpin toggle, and its paginated rider list.
+// The clicked line: header, a pin/unpin toggle, and (unless collapsed) its
+// paginated rider list. Collapsed once the line is pinned — the comparison above
+// already covers its riders, so only the header + unpin toggle remain.
 function ActiveLine({
   line,
   riders,
   pinned,
+  collapsed,
   onPin,
   onUnpin,
   onPick,
@@ -190,13 +200,14 @@ function ActiveLine({
   line: TransitSel;
   riders: Row[] | null;
   pinned: boolean;
+  collapsed: boolean;
   onPin: () => void;
   onUnpin: () => void;
   onPick: (pid: number) => void;
 }) {
   const accent = ACCENT[line.mode] ?? ACCENT.train;
   return (
-    <div key={line.venueId}>
+    <div key={line.venueId} className={collapsed ? "tp-active sep" : "tp-active"}>
       <div className="hero-cap" style={{ color: accent }}>
         {humanize(line.mode)} line
       </div>
@@ -212,16 +223,20 @@ function ActiveLine({
         {pinned ? "✓ Pinned — unpin" : "+ Pin to compare"}
       </button>
 
-      <div className="dsub" style={{ paddingLeft: 0, paddingRight: 0 }}>
-        <span className="t">Riders</span>
-      </div>
-      <RiderList
-        key={line.venueId}
-        rows={riders}
-        accent={accent}
-        onPick={onPick}
-        emptyText="No riders recorded for this line."
-      />
+      {!collapsed && (
+        <>
+          <div className="dsub" style={{ paddingLeft: 0, paddingRight: 0 }}>
+            <span className="t">Riders</span>
+          </div>
+          <RiderList
+            key={line.venueId}
+            rows={riders}
+            accent={accent}
+            onPick={onPick}
+            emptyText="No riders recorded for this line."
+          />
+        </>
+      )}
     </div>
   );
 }

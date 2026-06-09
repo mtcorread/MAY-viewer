@@ -247,7 +247,9 @@ h1, h2, h3 { font-weight: 600; }
 /* Transit panel (right side, Map mode / transit overlay). */
 .tp-title { font-size: 19px; font-weight: 600; color: var(--ink); margin-top: 4px; line-height: 1.2; word-break: break-word; }
 .tp-legend-note { margin-top: 14px; font-size: 11px; color: var(--ink3); font-variant-numeric: tabular-nums; }
-.tp-riders { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; overflow-y: auto; }
+/* Bounded so the active-line list and the shared-riders list never bury each
+   other — each scrolls within its own box. */
+.tp-riders { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; max-height: 320px; overflow-y: auto; }
 .tp-rider {
   display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
   padding: 8px 10px; border: 0; background: transparent; border-radius: 8px;
@@ -282,7 +284,11 @@ h1, h2, h3 { font-weight: 600; }
 .tp-pin:hover { background: var(--cardSel); color: var(--ink); }
 .tp-pin.on { border-color: #7a4fd0; color: #7a4fd0; }
 
-.tp-compare { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--hair); }
+/* The active (clicked) line sits below the comparison; `sep` divides it from
+   the compare tray when the line is pinned and collapsed. */
+.tp-active.sep { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--hair); }
+
+.tp-compare { margin-top: 4px; }
 .tp-clear {
   border: 0; background: transparent; cursor: pointer; padding: 0;
   font-size: 11px; color: var(--ink3); text-transform: uppercase; letter-spacing: 0.1em;
