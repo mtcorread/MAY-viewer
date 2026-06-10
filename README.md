@@ -22,6 +22,9 @@ each world's own metadata, so worlds with different structures all just work.
   responsive.
 - **Optional overlays**: bring your own boundary shapefiles, human-readable
   attribute labels, and an online basemap (OpenStreetMap, Carto, any XYZ tiles).
+- **Transit lines**: draw the world's train/tube routes on the map, click a line
+  to see who rides it, follow a rider's multi-leg journey (with start/end markers),
+  and compare lines for shared ridership.
 
 ## Quick start
 
@@ -61,7 +64,7 @@ mayviewer serve /path/to/world_state.h5
 | Command | What it does |
 | --- | --- |
 | `mayviewer describe <world.h5>` | Print the world's discovered schema (geo levels, venue types, attribute names). |
-| `mayviewer prep <world.h5>` | Build the cached viewer artifacts. `--no-drilldown` for a fast, tiny build; `--force` to rebuild. |
+| `mayviewer prep <world.h5>` | Build the cached viewer artifacts. `--no-drilldown` for a fast, tiny build; `--force` to rebuild; `--boundary-config` for real shapes; `--transit-geometry` + `--mgu-coords` for the transit layer. |
 | `mayviewer serve <world.h5>` | Serve the viewer in your browser. `--host`/`--port`/`--no-open`/`--basemap` to configure. |
 | `mayviewer match <world.h5> <shapes>` | Diagnose how boundary shapes line up with the world's geo units (read-only). |
 
@@ -121,6 +124,38 @@ mayviewer prep  /path/to/world_state.h5 --boundary-config /path/to/boundary_conf
 Geo extras need `pip install -e ".[geo]"`. Changing the config triggers a rebuild
 automatically. For England/Wales, the ONS Open Geography Portal publishes matching
 files; baking a national OA-level file can take 10+ minutes.
+
+### Transit lines: draw train/tube routes and explore who rides them
+
+Worlds built with MAY's route distributor contain transit line venues (which lines
+exist, who rides them, per-leg timings) — but not the route *geometry*. Supply the
+two CSVs the world was built from and `prep` bakes a transit layer:
+
+```bash
+mayviewer prep /path/to/world_state.h5 \
+    --transit-geometry /path/to/line_stops.csv \
+    --mgu-coords      /path/to/coord_mgu.csv
+```
+
+- `line_stops.csv` — each line's ordered stops (`line_id, position, node_mgu, name, …`).
+  In the MAY repo: `dev-scripts/transport/line_stops.csv`.
+- `coord_mgu.csv` — geo-unit centroids (`MGU, latitude, longitude`) used to place
+  each stop. In the MAY repo: `data/geography/coord_mgu.csv`.
+- The flags must be given together; changing either CSV triggers a rebuild
+  automatically. Worlds with no train/tube venues skip the layer with a warning.
+- Buses are excluded by design: `bus_pool_*` venues are a single pooled hop with
+  no route geometry.
+
+A **Transit** chip then appears in the map's Layers card. Click a line to list its
+riders; pick a rider to see their multi-leg journey highlighted on the map, with the
+legs and timings in the panel; pin two or more lines to see the riders they share.
+
+Worlds whose route distributor records journey origin/destination (per-leg
+`origin/dest/board/alight` geo units in `membership_metadata`) additionally get
+**start/end markers** on the map — a hollow ring where the journey begins, a filled
+disc where it ends, dots at interchanges — and the endpoint unit names in the panel.
+The unit centroids come from the boundary overlay, so bake it too (see above) to see
+the markers.
 
 ### Display labels: show human-readable names for attribute codes
 

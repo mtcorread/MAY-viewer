@@ -33,10 +33,11 @@ from .reader import WorldReader
 logger = logging.getLogger("mayviewer.prep")
 
 # v2: members carry ``home_geo_unit`` and the cache ships a person_home_unit
-# index, so venue members living outside the inspected unit resolve. Bumping
-# this invalidates v1 caches (which lack both) so the feature activates on
-# re-prep without a manual --force.
-MANIFEST_VERSION = 2
+# index, so venue members living outside the inspected unit resolve.
+# v3: optional transit artifact (train/tube lines, riders, leg chains). Bumping
+# invalidates older caches (which lack these) so a feature activates on re-prep
+# without a manual --force.
+MANIFEST_VERSION = 3
 
 
 def cache_dir(source: Path) -> Path:
@@ -50,11 +51,20 @@ def _fingerprint(source: Path) -> dict:
 
 def prep(source: str | Path, force: bool = False,
          boundary_config: str | Path | None = None,
-         drilldown: bool = True) -> dict:
+         drilldown: bool = True,
+         transit_geometry: str | Path | None = None,
+         mgu_coords: str | Path | None = None) -> dict:
     """Build the viewer cache. With ``drilldown=False`` the per-unit drill-down
     shards are skipped; the map + aggregates are still built, and the drill-down
     is recorded as a *lazy* presence index (which units have data), to be served
-    live from the source ``.h5`` by ``mayviewer serve``."""
+    live from the source ``.h5`` by ``mayviewer serve``.
+
+    Pass both ``transit_geometry`` (``line_stops.csv``) and ``mgu_coords``
+    (``coord_mgu.csv``) to additionally bake the transit layer (train/tube line
+    geometry + per-line riders + per-rider leg chains). The two CSVs hold the
+    line geometry, which the world ``.h5`` does not carry. The step is skipped
+    gracefully when a world has no train/tube line venues, or none of its lines
+    resolve to geometry in the supplied CSV."""
     source = Path(source).resolve()
     out = cache_dir(source)
     manifest_path = out / "manifest.json"
@@ -67,12 +77,22 @@ def prep(source: str | Path, force: bool = False,
         bcfg = load_boundary_config(boundary_config)
     bfp = _fingerprint(Path(boundary_config).resolve()) if boundary_config else None
 
+    # Transit needs both CSVs; the geometry one without coordinates can't place
+    # stops, so require the pair (or neither).
+    if bool(transit_geometry) != bool(mgu_coords):
+        raise ValueError("--transit-geometry and --mgu-coords must be given together.")
+    # Either CSV changing (or being added/removed) must invalidate the cache.
+    tfp = ([_fingerprint(Path(transit_geometry).resolve()),
+            _fingerprint(Path(mgu_coords).resolve())]
+           if transit_geometry else None)
+
     if manifest_path.exists() and not force:
         existing = json.loads(manifest_path.read_text())
         src = existing.get("source", {})
         if (existing.get("manifest_version") == MANIFEST_VERSION
                 and src.get("fingerprint") == _fingerprint(source)
                 and src.get("boundary_fingerprint") == bfp
+                and src.get("transit_fingerprint") == tfp
                 and bool(existing.get("drilldown_lazy", False)) == (not drilldown)):
             logger.info("Cache up to date: %s", out)
             return existing
@@ -171,6 +191,31 @@ def prep(source: str | Path, force: bool = False,
             logger.info("Mapless world (no geography/latitudes): "
                         "skipping hexbin + boundaries.")
 
+        # Transit (train/tube lines). Self-contained: line geometry comes from
+        # the two CSVs, not the world, so it builds independent of `spatial`.
+        transit_artifact: dict | None = None
+        if transit_geometry and mgu_coords:
+            from . import transit as tr
+            logger.info("Transit: joining lines, riders, leg chains...")
+            tres = tr.build_transit(r, schema, str(transit_geometry), str(mgu_coords))
+            if not tres["line_venues"]:
+                logger.warning("Transit: world has no train/tube line venues; "
+                               "skipping transit layer.")
+            elif not tres["in_world_lines"]:
+                logger.warning("Transit: %d line venues found but none resolve to "
+                               "geometry in %s; skipping transit layer.",
+                               len(tres["line_venues"]), transit_geometry)
+            else:
+                tpm = pmtiles.write_transit_pmtiles(
+                    tres["in_world_lines"], out / "transit.pmtiles")
+                r_name, r_idx = tr.write_rider_shards(
+                    tres["riders"], tres["line_venues"], out, home_lut)
+                c_name, c_idx = tr.write_chain_shards(
+                    tres["chains"], tres["line_venues"], tres["chain_fields"],
+                    out, home_lut)
+                transit_artifact = tr.report_payload(
+                    tres, tpm, r_name, r_idx, c_name, c_idx)
+
         # Largest single-unit slice per container == the pipeline's actual
         # peak-memory bound; recorded so 60M runs can be reasoned about.
         # Some worlds omit containers entirely (e.g. no activity_mappings) —
@@ -189,6 +234,8 @@ def prep(source: str | Path, force: bool = False,
         artifacts["hexbin"] = {"path": "hexbin.pmtiles", **pm_stats}
     if boundaries_artifact:
         artifacts["boundaries"] = boundaries_artifact
+    if transit_artifact:
+        artifacts["transit"] = transit_artifact
 
     manifest = {
         "manifest_version": MANIFEST_VERSION,
@@ -197,6 +244,7 @@ def prep(source: str | Path, force: bool = False,
             "name": source.name,
             "fingerprint": _fingerprint(source),
             "boundary_fingerprint": bfp,
+            "transit_fingerprint": tfp,
         },
         "spatial": spatial,
         # True ⇒ drill-down shards were not built; serve reads them live.

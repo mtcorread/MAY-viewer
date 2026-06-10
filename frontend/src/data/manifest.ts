@@ -65,6 +65,41 @@ export interface BoundaryArtifact {
   levels: BoundaryLevel[];
 }
 
+/**
+ * Transit (train/tube) layer. `lines` is a PMTiles vector layer of route
+ * geometry (contiguous zoom pyramid, one `lines` source-layer); each feature
+ * carries `line_id`, `venue_id`, `mode`, `rider_count`. `riders` and `chains`
+ * are drill-down Parquets read by bounded row group: riders keyed by line
+ * `venue_id` (click a line → its riders, or intersect two lines), chains keyed
+ * by each rider's home geo unit (select a rider → their ordered legs). Present
+ * only when prep was given the line-geometry CSVs.
+ */
+export interface TransitArtifact {
+  lines: {
+    path: string;
+    layer: string; // PMTiles source-layer name ("lines")
+    minzoom: number; // archive's lowest baked zoom (source pin)
+    maxzoom: number; // archive's highest baked zoom (overzoomed above)
+    bake_zooms: number[];
+    tiles: number;
+    features: number;
+    bytes: number;
+  };
+  riders: { path: string; row_groups: Record<string, number> }; // venue_id → rg
+  // chains.fields lists the per-leg metadata columns this world recorded
+  // (mirrors the h5 membership_metadata registry — e.g. t_board_min, or
+  // origin/dest/board/alight unit ids in worlds that persist them). Absent in
+  // caches baked before the field passthrough.
+  chains: { path: string; row_groups: Record<string, number>; fields?: string[] }; // home_unit → rg
+  summary: {
+    lines: number;
+    train: number;
+    tube: number;
+    rider_memberships: number;
+    riders_with_chains: number;
+  };
+}
+
 export interface Manifest {
   manifest_version: number;
   source: {
@@ -91,6 +126,8 @@ export interface Manifest {
     // Both omitted in mapless caches.
     hexbin?: { path: string; tiles: number; zooms: number[]; layers: string[]; bytes?: number };
     boundaries?: BoundaryArtifact;
+    // Present only when prep was given the transit-geometry CSVs.
+    transit?: TransitArtifact;
   };
   peak_unit_rows: Record<string, number>;
   build_seconds: number;
