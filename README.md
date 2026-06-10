@@ -155,7 +155,7 @@ Worlds whose route distributor records journey origin/destination (per-leg
 **start/end markers** on the map — a hollow ring where the journey begins, a filled
 disc where it ends, dots at interchanges — and the endpoint unit names in the panel.
 The unit centroids come from the boundary overlay, so bake it too (see above) to see
-the markers. Older worlds without those fields simply omit them.
+the markers.
 
 ### Display labels: show human-readable names for attribute codes
 
