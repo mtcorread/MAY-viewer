@@ -86,7 +86,11 @@ export interface TransitArtifact {
     bytes: number;
   };
   riders: { path: string; row_groups: Record<string, number> }; // venue_id → rg
-  chains: { path: string; row_groups: Record<string, number> }; // home_unit → rg
+  // chains.fields lists the per-leg metadata columns this world recorded
+  // (mirrors the h5 membership_metadata registry — e.g. t_board_min, or
+  // origin/dest/board/alight unit ids in worlds that persist them). Absent in
+  // caches baked before the field passthrough.
+  chains: { path: string; row_groups: Record<string, number>; fields?: string[] }; // home_unit → rg
   summary: {
     lines: number;
     train: number;

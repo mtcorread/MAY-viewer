@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import os
 from collections import defaultdict
 from pathlib import Path
@@ -48,6 +49,8 @@ import numpy as np
 import pyarrow as pa
 
 from .personindex import home_unit_of
+
+logger = logging.getLogger(__name__)
 
 # Venue types that have real, drawable multi-leg route geometry. Buses excluded.
 TRANSIT_TYPE_NAMES = ("train_line", "tube_line")
@@ -171,19 +174,41 @@ def collect_riders(reader, line_venues: dict[int, dict]) -> dict[int, list[int]]
     return riders
 
 
-def collect_chains(reader, line_vids: set[int]) -> dict[int, list[tuple[int, int, int]]]:
-    """``person_id -> [(t_board, t_alight, venue_id), ...]`` ordered by board
-    time, for legs on a train/tube line. ``membership_metadata`` is read in
-    bounded chunks; only transit legs are kept, so the held map is bounded by
-    transit ridership (a fraction of a 60M population — acceptable; a true
-    external sort would be the next step if a world's ridership ever dwarfs RAM).
-    """
+# Chain columns the writer owns; a metadata field with one of these names
+# would collide with them and is dropped (with a warning) rather than shadowed.
+_CHAIN_BASE_COLS = ("person_id", "home_geo_unit", "leg_idx", "venue_id",
+                    "line_id", "mode")
+
+
+def collect_chains(reader, line_vids: set[int],
+                   ) -> tuple[list[str], dict[int, list[tuple[int, tuple]]]]:
+    """``(fields, person_id -> [(venue_id, values), ...])`` for legs on a
+    train/tube line, where ``fields`` is whatever ``membership_metadata``
+    declares in its ``field_names`` registry (t_board/t_alight today; origin/
+    dest/board/alight unit ids in worlds that record them) and ``values``
+    holds that leg's fields in the same order. Legs are ordered by the
+    recorded ``leg_idx`` when the world persists it (the authoritative route
+    sequence), else by ``t_board_min`` — a fallback that can misorder
+    interchange journeys, since those times are line-relative offsets, not
+    journey clocks. Reads are bounded chunks; only transit legs are kept, so
+    the held map is bounded by transit ridership (a fraction of a 60M
+    population — acceptable; a true external sort would be the next step if a
+    world's ridership ever dwarfs RAM)."""
     mm = reader.file[_MM_GROUP]
+    declared = ([f.decode() if isinstance(f, bytes) else str(f)
+                 for f in mm["field_names"][:]] if "field_names" in mm else [])
+    fields = [f for f in declared if f in mm and f not in _CHAIN_BASE_COLS]
+    shadowed = [f for f in declared if f in mm
+                and f in _CHAIN_BASE_COLS and f != "leg_idx"]
+    if shadowed:
+        logger.warning("membership_metadata fields shadow chain columns, "
+                       "dropped: %s", shadowed)
+    sort_ds = ("leg_idx" if "leg_idx" in mm
+               else "t_board_min" if "t_board_min" in mm else None)
     pid_ds, vid_ds = mm["person_ids"], mm["venue_ids"]
-    tb_ds, ta_ds = mm["t_board_min"], mm["t_alight_min"]
     n = pid_ds.shape[0]
     want = np.fromiter(line_vids, dtype=np.int64)
-    chains: dict[int, list[tuple[int, int, int]]] = defaultdict(list)
+    keyed: dict[int, list[tuple[float, int, tuple]]] = defaultdict(list)
     for lo in range(0, n, _MM_CHUNK):
         hi = min(lo + _MM_CHUNK, n)
         v = vid_ds[lo:hi].astype(np.int64)
@@ -192,14 +217,17 @@ def collect_chains(reader, line_vids: set[int]) -> dict[int, list[tuple[int, int
             continue
         p = pid_ds[lo:hi][keep]
         vv = v[keep]
-        b = tb_ds[lo:hi][keep]
-        a = ta_ds[lo:hi][keep]
-        for pp, vx, bb, aa in zip(p, vv, b, a):
-            chains[int(pp)].append(
-                (int(round(float(bb))), int(round(float(aa))), int(vx)))
-    for pp in chains:
-        chains[pp].sort()  # order legs by board time
-    return chains
+        sk = mm[sort_ds][lo:hi][keep] if sort_ds else None
+        cols = [mm[f][lo:hi][keep] for f in fields]
+        for j in range(len(p)):
+            keyed[int(p[j])].append(
+                (float(sk[j]) if sk is not None else 0.0, int(vv[j]),
+                 tuple(float(c[j]) for c in cols)))
+    chains: dict[int, list[tuple[int, tuple]]] = {}
+    for pp, legs in keyed.items():
+        legs.sort(key=lambda t: t[0])  # stable: equal keys keep file order
+        chains[pp] = [(vid, vals) for _k, vid, vals in legs]
+    return fields, chains
 
 
 def build_transit(reader, schema, line_stops_csv: str, coord_mgu_csv: str) -> dict:
@@ -213,10 +241,10 @@ def build_transit(reader, schema, line_stops_csv: str, coord_mgu_csv: str) -> di
     line_venues = collect_line_venues(reader, schema)
     if not line_venues:
         return {"line_venues": {}, "riders": {}, "chains": {},
-                "geometry": {}, "in_world_lines": []}
+                "chain_fields": [], "geometry": {}, "in_world_lines": []}
 
     riders = collect_riders(reader, line_venues)
-    chains = collect_chains(reader, set(line_venues))
+    chain_fields, chains = collect_chains(reader, set(line_venues))
 
     world_line_ids = {m["line_id"] for m in line_venues.values()}
     geometry = build_geometry(line_stops_csv, coord_mgu_csv, keep=world_line_ids)
@@ -244,6 +272,7 @@ def build_transit(reader, schema, line_stops_csv: str, coord_mgu_csv: str) -> di
         "line_venues": line_venues,
         "riders": riders,
         "chains": chains,
+        "chain_fields": chain_fields,
         "geometry": geometry,
         "in_world_lines": in_world_lines,
     }
@@ -258,16 +287,6 @@ _RIDERS_SCHEMA = pa.schema([
     ("home_geo_unit", pa.int64()),  # which people shard resolves this rider
 ])
 
-_CHAINS_SCHEMA = pa.schema([
-    ("person_id", pa.int64()),
-    ("home_geo_unit", pa.int64()),
-    ("leg_idx", pa.int32()),
-    ("t_board_min", pa.int32()),
-    ("t_alight_min", pa.int32()),
-    ("venue_id", pa.int64()),
-    ("line_id", pa.string()),
-    ("mode", pa.string()),
-])
 
 
 def write_rider_shards(riders: dict, line_venues: dict, out_dir: Path,
@@ -293,12 +312,15 @@ def write_rider_shards(riders: dict, line_venues: dict, out_dir: Path,
     return w.path.name, w.index
 
 
-def write_chain_shards(chains: dict, line_venues: dict, out_dir: Path,
-                       home_lut=None) -> tuple[str, dict[int, int]]:
+def write_chain_shards(chains: dict, line_venues: dict, fields: list[str],
+                       out_dir: Path, home_lut=None) -> tuple[str, dict[int, int]]:
     """``transit_chains.parquet``: one row group per *home* geo unit, each row a
     leg (ordered by ``leg_idx``). Keyed by home unit so selecting a rider in the
     panel fetches their journey with the same person→home-unit index the rest of
-    the viewer uses. Returns ``(filename, {home_geo_unit: rg})``."""
+    the viewer uses. Besides the structural columns, every ``fields`` entry
+    (whatever the world's membership_metadata declared) becomes a column — an
+    integral one when all its values are whole (times, unit ids), float64
+    otherwise. Returns ``(filename, {home_geo_unit: rg})``."""
     from .drilldown import _ShardWriter
     pids = np.fromiter(chains.keys(), np.int64, len(chains))
     homes = (home_unit_of(home_lut, pids) if home_lut is not None
@@ -307,22 +329,37 @@ def write_chain_shards(chains: dict, line_venues: dict, out_dir: Path,
     for p, h in zip(pids, homes):
         by_home[int(h)].append(int(p))
 
-    w = _ShardWriter(out_dir / "transit_chains.parquet", _CHAINS_SCHEMA)
-    cols_keys = ("person_id", "home_geo_unit", "leg_idx", "t_board_min",
-                 "t_alight_min", "venue_id", "line_id", "mode")
+    integral = [True] * len(fields)
+    for legs in chains.values():
+        for _vid, vals in legs:
+            for i, x in enumerate(vals):
+                if integral[i] and x != int(x):
+                    integral[i] = False
+
+    sch = pa.schema([
+        ("person_id", pa.int64()),
+        ("home_geo_unit", pa.int64()),
+        ("leg_idx", pa.int32()),
+        ("venue_id", pa.int64()),
+        ("line_id", pa.string()),
+        ("mode", pa.string()),
+        *((f, pa.int64() if integral[i] else pa.float64())
+          for i, f in enumerate(fields)),
+    ])
+    w = _ShardWriter(out_dir / "transit_chains.parquet", sch)
     for h in sorted(by_home):
-        cols: dict[str, list] = {k: [] for k in cols_keys}
+        cols: dict[str, list] = {k.name: [] for k in sch}
         for p in by_home[h]:
-            for i, (tb, ta, vid) in enumerate(chains[p]):
+            for i, (vid, vals) in enumerate(chains[p]):
                 m = line_venues.get(vid, {})
                 cols["person_id"].append(p)
                 cols["home_geo_unit"].append(h)
                 cols["leg_idx"].append(i)
-                cols["t_board_min"].append(tb)
-                cols["t_alight_min"].append(ta)
                 cols["venue_id"].append(vid)
                 cols["line_id"].append(m.get("line_id", ""))
                 cols["mode"].append(m.get("mode", ""))
+                for fi, f in enumerate(fields):
+                    cols[f].append(int(vals[fi]) if integral[fi] else vals[fi])
         w.write_unit(h, cols)
     w.close()
     return w.path.name, w.index
@@ -337,7 +374,10 @@ def report_payload(result: dict, pm_stats: dict, riders_file: str,
             k: pm_stats[k] for k in ("minzoom", "maxzoom", "bake_zooms",
                                      "tiles", "features", "bytes")}},
         "riders": {"path": riders_file, "row_groups": riders_idx},
-        "chains": {"path": chains_file, "row_groups": chains_idx},
+        # ``fields`` mirrors the world's membership_metadata registry so the
+        # frontend can discover per-leg columns without a schema read.
+        "chains": {"path": chains_file, "row_groups": chains_idx,
+                   "fields": result["chain_fields"]},
         "summary": {
             "lines": len(result["in_world_lines"]),
             "train": sum(1 for m in modes if m == "train"),
@@ -398,9 +438,11 @@ def _sample_json(result: dict, n_lines: int = 3,
                     break
 
     def resolve(p: int):
-        legs = [{"t_board_min": b, "t_alight_min": a, "venue_id": v,
-                 "line_id": line_id_by_vid.get(v), "mode": mode_by_vid.get(v)}
-                for b, a, v in result["chains"].get(p, [])]
+        fields = result["chain_fields"]
+        legs = [{"venue_id": v, "line_id": line_id_by_vid.get(v),
+                 "mode": mode_by_vid.get(v),
+                 **dict(zip(fields, vals))}
+                for v, vals in result["chains"].get(p, [])]
         return {"person_id": p, "n_legs": len(legs), "legs": legs}
 
     return {"sample_lines": sample_lines,

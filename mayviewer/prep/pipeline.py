@@ -211,7 +211,8 @@ def prep(source: str | Path, force: bool = False,
                 r_name, r_idx = tr.write_rider_shards(
                     tres["riders"], tres["line_venues"], out, home_lut)
                 c_name, c_idx = tr.write_chain_shards(
-                    tres["chains"], tres["line_venues"], out, home_lut)
+                    tres["chains"], tres["line_venues"], tres["chain_fields"],
+                    out, home_lut)
                 transit_artifact = tr.report_payload(
                     tres, tpm, r_name, r_idx, c_name, c_idx)
 

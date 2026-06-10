@@ -32,6 +32,18 @@ interface Leg {
   venueId: number;
   lineId: string;
   mode: string;
+  // Geo units recorded by worlds that persist journey O/D (-1 when the cache
+  // predates those fields or a stop lies outside the world).
+  originUnit: number;
+  destUnit: number;
+  boardUnit: number;
+  alightUnit: number;
+}
+
+// Unit-id cell: -1 when the column is absent (old cache) — num() alone would
+// turn `undefined` into 0, which can be a real geo id.
+function uid(v: unknown): number {
+  return v == null ? -1 : num(v);
 }
 
 // Board/alight are minutes-from-day-start in the simulation's commute window
@@ -96,6 +108,7 @@ export function TransitPanel() {
     pinTransitLine,
     unpinTransitLine,
     clearTransitCompare,
+    gotoPerson,
   } = useStore();
   const transit = manifest!.artifacts.transit!;
   const dd = manifest!.artifacts.drilldown;
@@ -144,6 +157,11 @@ export function TransitPanel() {
           pid={transitRider}
           homeUnit={homeByPid.get(transitRider) ?? -1}
           onBack={() => selectTransitRider(null)}
+          // Jump to the rider's full profile in Inspect. gotoPerson snapshots
+          // this map+transit spot on the back-stack, and the transit selection
+          // itself is left untouched — the Inspector's "← Back" returns here
+          // with the lines, pins, and this rider's journey still up.
+          onProfile={() => void gotoPerson(transitRider, homeByPid.get(transitRider))}
           setJourney={setTransitJourney}
           peopleArt={dd.people}
         />
@@ -375,18 +393,43 @@ function RiderJourney({
   pid,
   homeUnit,
   onBack,
+  onProfile,
   setJourney,
   peopleArt,
 }: {
   pid: number;
   homeUnit: number;
   onBack: () => void;
-  setJourney: (venueIds: number[]) => void;
+  onProfile: () => void;
+  setJourney: (venueIds: number[], odUnits?: number[]) => void;
   peopleArt: import("../data/manifest").DrilldownArtifact;
 }) {
   const transit = useStore((s) => s.manifest!.artifacts.transit!);
+  const findUnit = useStore((s) => s.findUnit);
   const [legs, setLegs] = useState<Leg[] | null>(null);
   const [person, setPerson] = useState<Row | null>(null);
+  const [od, setOd] = useState<[string, string] | null>(null);
+
+  // Resolve the journey's recorded endpoints to unit names (worlds that
+  // persist O/D only; old caches leave this line out).
+  useEffect(() => {
+    setOd(null);
+    const first = legs?.[0];
+    if (!first || first.originUnit < 0 || first.destUnit < 0) return;
+    let alive = true;
+    void Promise.all([findUnit(first.originUnit), findUnit(first.destUnit)]).then(
+      ([o, d]) => {
+        if (alive)
+          setOd([
+            o?.geo_name ?? `unit ${first.originUnit}`,
+            d?.geo_name ?? `unit ${first.destUnit}`,
+          ]);
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [legs, findUnit]);
 
   useEffect(() => {
     let alive = true;
@@ -410,10 +453,27 @@ function RiderJourney({
           venueId: num(r.venue_id),
           lineId: String(r.line_id ?? ""),
           mode: String(r.mode ?? ""),
+          originUnit: uid(r.origin_unit_id),
+          destUnit: uid(r.dest_unit_id),
+          boardUnit: uid(r.board_unit_id),
+          alightUnit: uid(r.alight_unit_id),
         }))
         .sort((a, b) => a.legIdx - b.legIdx);
       setLegs(mine);
-      setJourney(mine.map((l) => l.venueId));
+      // The geo-unit sequence travelled: origin, each leg's board/alight
+      // (consecutive duplicates collapse — leg N's alight is leg N+1's board),
+      // destination. Empty for old caches; the map draws nothing then.
+      const seq: number[] = [];
+      const push = (u: number) => {
+        if (u >= 0 && seq[seq.length - 1] !== u) seq.push(u);
+      };
+      mine.forEach((l, i) => {
+        if (i === 0) push(l.originUnit);
+        push(l.boardUnit);
+        push(l.alightUnit);
+      });
+      if (mine.length) push(mine[mine.length - 1].destUnit);
+      setJourney(mine.map((l) => l.venueId), seq);
     });
 
     // Resolve the rider's attribute row (one id lazily, or one unit read).
@@ -448,6 +508,18 @@ function RiderJourney({
             ? "reading journey…"
             : `${legs.length} ${legs.length === 1 ? "leg" : "legs"}`}
         </div>
+        {od && (
+          <div className="tp-od">
+            <span className="tp-od-dot start" />
+            {od[0]}
+            <span className="tp-od-arrow">→</span>
+            <span className="tp-od-dot end" />
+            {od[1]}
+          </div>
+        )}
+        <button className="tp-profile" onClick={onProfile}>
+          Open profile in Inspect ›
+        </button>
       </div>
 
       {legs == null ? (

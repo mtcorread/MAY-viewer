@@ -71,6 +71,7 @@ export function MapView() {
     setBasemapOn,
     transitLine,
     transitJourney,
+    transitOD,
     transitCompare,
   } = useStore();
   // MapView only mounts in map mode, which the shell hides for mapless
@@ -284,6 +285,50 @@ export function MapView() {
           filter: NO_VENUE,
           layout: { visibility: "none", "line-join": "round", "line-cap": "round" },
           paint: { "line-color": "#f5b301", "line-width": lineW(3.4) },
+        },
+      );
+      // Where the journey starts and ends: a GeoJSON overlay fed from the
+      // rider's recorded geo-unit sequence (origin → interchanges → dest),
+      // resolved to unit centroids. Empty until a rider with O/D data is
+      // selected; old caches without the fields never populate it.
+      sources["transit-od"] = {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      };
+      styleLayers.push(
+        {
+          id: "transit-od-path",
+          type: "line",
+          source: "transit-od",
+          filter: ["==", ["geometry-type"], "LineString"],
+          layout: { visibility: "none", "line-join": "round", "line-cap": "round" },
+          paint: {
+            "line-color": "#111827",
+            "line-opacity": 0.55,
+            "line-width": 1.6,
+            "line-dasharray": [1.5, 2.2],
+          },
+        },
+        {
+          id: "transit-od-point",
+          type: "circle",
+          source: "transit-od",
+          filter: ["==", ["geometry-type"], "Point"],
+          layout: { visibility: "none" },
+          paint: {
+            // start = hollow ring, end = filled disc, via = small dot.
+            "circle-radius": [
+              "match", ["get", "role"], "via", 3.5, 6.5,
+            ],
+            "circle-color": [
+              "match", ["get", "role"],
+              "start", "#ffffff",
+              "end", "#111827",
+              "#6b7280",
+            ],
+            "circle-stroke-color": "#111827",
+            "circle-stroke-width": ["match", ["get", "role"], "via", 1, 2],
+          },
         },
       );
     }
@@ -520,6 +565,7 @@ export function MapView() {
       if (transit)
         for (const id of [
           "transit-casing", "transit-line", "transit-hover", "transit-sel", "transit-journey",
+          "transit-od-path", "transit-od-point",
         ])
           if (map.getLayer(id))
             map.setLayoutProperty(id, "visibility", tr ? "visible" : "none");
@@ -648,6 +694,57 @@ export function MapView() {
     if (map.isStyleLoaded()) apply();
     else map.once("styledata", apply);
   }, [transit, transitLine, transitJourney, transitCompare]);
+
+  // The selected rider's recorded geo-unit sequence → start/end markers and a
+  // dashed path through the interchanges. Centroids come from the aggregate
+  // rows (geo:lon/geo:lat, baked with the boundary overlay); units that lack
+  // them (or a cache without O/D fields) simply contribute nothing.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !transit) return;
+    let alive = true;
+    const { findUnit } = useStore.getState();
+    void Promise.all(transitOD.map((u) => findUnit(u))).then((rows) => {
+      if (!alive || !mapRef.current) return;
+      const pts: { lon: number; lat: number; name: string }[] = [];
+      for (const r of rows) {
+        const lon = Number(r?.["geo:lon"]);
+        const lat = Number(r?.["geo:lat"]);
+        if (r && isFinite(lon) && isFinite(lat))
+          pts.push({ lon, lat, name: r.geo_name });
+      }
+      const features: GeoJSON.Feature[] = pts.map((p, i) => ({
+        type: "Feature",
+        properties: {
+          role: i === 0 ? "start" : i === pts.length - 1 ? "end" : "via",
+          name: p.name,
+        },
+        geometry: { type: "Point", coordinates: [p.lon, p.lat] },
+      }));
+      if (pts.length >= 2)
+        features.push({
+          type: "Feature",
+          properties: { role: "path" },
+          geometry: {
+            type: "LineString",
+            coordinates: pts.map((p) => [p.lon, p.lat]),
+          },
+        });
+      const apply = () => {
+        const src = map.getSource("transit-od") as maplibregl.GeoJSONSource | undefined;
+        if (src)
+          src.setData({
+            type: "FeatureCollection",
+            features: pts.length >= 2 ? features : [],
+          });
+      };
+      if (map.isStyleLoaded()) apply();
+      else map.once("styledata", apply);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [transit, transitOD]);
 
   // Entering transit mode → frame the whole line network (its PMTiles bounds).
   useEffect(() => {
