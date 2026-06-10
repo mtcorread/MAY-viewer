@@ -146,6 +146,9 @@ mayviewer prep /path/to/world_state.h5 \
 - Buses are excluded by design: `bus_pool_*` venues are a single pooled hop with
   no route geometry.
 
+<img width="500" alt="Transit lines" src="https://github.com/user-attachments/assets/dea9d5b5-46b5-4786-bca3-5521fe33ceaf" />
+
+
 A **Transit** chip then appears in the map's Layers card. Click a line to list its
 riders; pick a rider to see their multi-leg journey highlighted on the map, with the
 legs and timings in the panel; pin two or more lines to see the riders they share.
