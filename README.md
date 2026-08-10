@@ -25,6 +25,10 @@ each world's own metadata, so worlds with different structures all just work.
 - **Transit lines**: draw the world's train/tube routes on the map, click a line
   to see who rides it, follow a rider's multi-leg journey (with start/end markers),
   and compare lines for shared ridership.
+- **Day and night**: a toggle in the header switches the viewer's panels and
+  chrome between the light and dark palettes. It follows your OS preference on
+  first load and remembers your choice after that. The map keeps its own light
+  ground and density ramps in both themes.
 
 ## Quick start
 
@@ -190,7 +194,9 @@ mayviewer serve /path/to/world_state.h5 --basemap osm
 
 Accepts `osm`, `carto-light`, `carto-dark`, or any XYZ template URL
 (`https://tile.example.com/{z}/{x}/{y}.png`). A Layers card in the map lets you
-toggle it off at runtime.
+toggle it off at runtime. The basemap is chosen at serve time and is independent
+of the day/night toggle, so pick `carto-dark` if you want the map to match a dark
+UI.
 
 ## Development
 

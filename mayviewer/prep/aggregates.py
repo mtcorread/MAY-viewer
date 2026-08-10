@@ -37,16 +37,37 @@ def _dec(v) -> str:
     return v.decode() if isinstance(v, bytes) else str(v)
 
 
+def _spread_sample(reader, path: str, total: int) -> np.ndarray:
+    """`_SAMPLE` values drawn in evenly-spaced blocks across the whole dataset.
+
+    A single leading `slice(path, 0, _SAMPLE)` is blind to a property that is
+    empty (or uniform) at the top of the table and only takes its real,
+    high-cardinality values further down — exactly the shape of a partner/id
+    relation like ``cohabiting_couple``, which is blank for the first tens of
+    thousands of people. Blocks spread across ``total`` see those values, so the
+    high-cardinality guard below can drop the property before it explodes the
+    aggregate table into one column per distinct id.
+    """
+    if total <= _SAMPLE:
+        return reader.slice(path, 0, total)
+    blocks = 8
+    per = max(1, _SAMPLE // blocks)
+    step = total // blocks
+    parts = [reader.slice(path, i * step, per) for i in range(blocks)]
+    return np.concatenate(parts)
+
+
 def _classify_properties(reader, schema) -> list[str]:
     """Person properties suitable for a categorical breakdown (sample-based)."""
     keep: list[str] = []
+    total = int(schema.num_people)
     for prop in schema.person_properties:
         if prop in schema.person_relations:
             continue  # a graph, not a category (handled by drill-down)
         path = f"population/properties/{prop}"
         if path not in reader:
             continue
-        sample = reader.slice(path, 0, _SAMPLE)
+        sample = _spread_sample(reader, path, total)
         vals = [_dec(v).strip() for v in sample]
         if any(v[:1] in ("[", "{") for v in vals):
             continue  # JSON-valued (e.g. comorbidities, friendships)
@@ -154,13 +175,21 @@ def to_tables(rows, props, schema, geo) -> dict[int, pa.Table]:
                   for i in range(max(code_to_sex) + 1 if code_to_sex else 1)]
     vtypes = schema.venue_types
 
-    # Stable category set per kept property (union across all leaves).
+    # Stable category set per kept property (union across all leaves). The
+    # sample-based classifier can still be fooled by a property that looks tame
+    # in the sample but blows past MAX_CATEGORIES over the full population (an
+    # id-like relation empty at the top of the table). Cap here as the real
+    # backstop: a property whose true cardinality exceeds the limit is dropped
+    # entirely rather than emitted as tens of thousands of columns.
     cats: dict[str, list[str]] = {}
     for p in props:
         seen: set[str] = set()
         for r in rows.values():
             seen.update(r.prop[p])
+        if len(seen) > MAX_CATEGORIES:
+            continue  # runaway cardinality — would explode the table
         cats[p] = sorted(seen)
+    props = [p for p in props if p in cats]
 
     # Source rows are keyed by their *actual* geo unit, which may sit at any
     # level (households at the leaf SGU; companies/offices at a coarser unit).
