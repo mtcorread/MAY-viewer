@@ -31,6 +31,44 @@
   --pineD:   #0b5b55;
 
   --shadow: 0 6px 24px rgba(15,23,42,0.07), 0 1px 0 rgba(15,23,42,0.04);
+
+  /* Floating map cards paint over the map, so they carry their own (light)
+     surface rather than a var. Named here so the dark theme can retint them
+     in one place instead of at every call-site. */
+  --float:   rgba(251,252,253,0.94);
+  --floatSolid: rgba(251,252,253,0.96);
+  --overlay: rgba(19,23,28,0.86); /* map hint pill */
+  --odInk:   #111827;             /* journey start/end marker ink */
+  --odBg:    #ffffff;
+}
+
+/* ── Night mode ─────────────────────────────────────────────────────────
+   Same variables, dimmed. A cool slate ground with softened ink so nothing
+   glows; accents lift a touch to stay legible on the dark surface. Applied
+   by stamping data-theme="dark" on <html> (see App.tsx). */
+:root[data-theme="dark"] {
+  --paper:   #0e1216;
+  --card:    #161c24;
+  --cardSel: #232e3b;
+  --hair:    #232b35;
+  --hairS:   #333d4a;
+
+  --ink:     #e6e9ee;
+  --ink2:    #aeb7c4;
+  --ink3:    #6f7a89;
+
+  --coral:   #4f8cff;
+  --coralD:  #6ea0ff;
+  --pine:    #2dd4bf;
+  --pineD:   #5ee0d0;
+
+  --shadow: 0 8px 28px rgba(0,0,0,0.5), 0 1px 0 rgba(0,0,0,0.3);
+
+  --float:   rgba(22,28,36,0.92);
+  --floatSolid: rgba(22,28,36,0.96);
+  --overlay: rgba(2,5,9,0.86);
+  --odInk:   #e6e9ee;
+  --odBg:    #0e1216;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -130,6 +168,17 @@ h1, h2, h3 { font-weight: 600; }
 .modes button:hover:not(.on) { color: var(--ink); }
 
 .kpis { margin-left: auto; display: flex; gap: 32px; }
+
+/* Night-mode toggle: a quiet round icon button at the header's right edge. */
+.themetoggle {
+  margin-left: 22px; flex: none; cursor: pointer; font: inherit;
+  width: 34px; height: 34px; border-radius: 8px; font-size: 16px; line-height: 1;
+  display: grid; place-items: center;
+  background: var(--paper); color: var(--ink2);
+  border: 1px solid var(--hair);
+  transition: background 0.14s, color 0.14s, border-color 0.14s;
+}
+.themetoggle:hover { background: var(--cardSel); color: var(--ink); border-color: var(--hairS); }
 .kpi { text-align: right; }
 .kpi .v { font-size: 22px; font-weight: 600; line-height: 1; color: var(--ink); font-variant-numeric: tabular-nums; }
 .kpi .k { display: block; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink3); margin-top: 5px; }
@@ -193,7 +242,7 @@ h1, h2, h3 { font-weight: 600; }
 .maplibregl-map { background: var(--paper) !important; }
 
 .efloat {
-  background: rgba(251,252,253,0.94);
+  background: var(--float);
   backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
   border: 1px solid var(--hairS);
   box-shadow: var(--shadow);
@@ -202,7 +251,7 @@ h1, h2, h3 { font-weight: 600; }
 
 .map-hint {
   position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
-  background: rgba(19,23,28,0.86); color: var(--paper);
+  background: var(--overlay); color: #eef1f5;
   padding: 7px 16px; border-radius: 999px; font-size: 11px; letter-spacing: 0.04em;
   pointer-events: none; z-index: 3;
 }
@@ -210,7 +259,7 @@ h1, h2, h3 { font-weight: 600; }
 .zoomctl { position: absolute; top: 16px; right: 16px; z-index: 3; display: flex; flex-direction: column; }
 .zoomctl button {
   width: 32px; height: 32px; display: grid; place-items: center;
-  background: rgba(251,252,253,0.96); border: 1px solid var(--hairS);
+  background: var(--floatSolid); border: 1px solid var(--hairS);
   color: var(--ink); font: inherit; font-size: 14px; cursor: pointer;
 }
 .zoomctl button:first-child { border-radius: 6px 6px 0 0; }
@@ -284,10 +333,10 @@ h1, h2, h3 { font-weight: 600; }
 .tp-od-arrow { color: var(--ink3); }
 .tp-od-dot {
   width: 9px; height: 9px; border-radius: 50%; flex: none;
-  border: 2px solid #111827;
+  border: 2px solid var(--odInk);
 }
-.tp-od-dot.start { background: #fff; }
-.tp-od-dot.end { background: #111827; }
+.tp-od-dot.start { background: var(--odBg); }
+.tp-od-dot.end { background: var(--odInk); }
 
 .tp-legs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
 .tp-leg { display: flex; gap: 12px; padding: 4px 0; }
@@ -344,7 +393,7 @@ h1, h2, h3 { font-weight: 600; }
 
 .map-attrib {
   position: absolute; right: 8px; bottom: 6px; z-index: 2;
-  background: rgba(251,252,253,0.7); border-radius: 4px; padding: 2px 7px;
+  background: var(--float); border-radius: 4px; padding: 2px 7px;
   font-size: 10px; color: var(--ink3); pointer-events: none;
 }
 

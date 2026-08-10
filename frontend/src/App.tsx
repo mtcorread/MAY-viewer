@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useStore } from "./state/store";
 import { compact } from "./util/format";
 import { MapView } from "./components/MapView";
@@ -9,6 +9,20 @@ import { Inspector } from "./components/Inspector";
 
 export function App() {
   const { manifest, error, mode, mapMode, setMode, init } = useStore();
+
+  // Night mode: stamp data-theme on <html> so the CSS variable overrides take
+  // over. Persisted across reloads; defaults to the OS preference.
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    const saved = localStorage.getItem("may-theme");
+    if (saved === "light" || saved === "dark") return saved;
+    return window.matchMedia?.("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light";
+  });
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("may-theme", theme);
+  }, [theme]);
 
   useEffect(() => {
     void init();
@@ -82,6 +96,15 @@ export function App() {
             <div className="k">Geo units</div>
           </div>
         </div>
+
+        <button
+          className="themetoggle"
+          onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+          title={theme === "dark" ? "Switch to day mode" : "Switch to night mode"}
+          aria-label="Toggle night mode"
+        >
+          {theme === "dark" ? "☀" : "☾"}
+        </button>
       </header>
 
       {mode === "map" && !mapless ? (
