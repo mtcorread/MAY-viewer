@@ -198,12 +198,19 @@ UI.
 ## Development
 
 ```bash
-# Run the test suite
+# Run the test suite (pytest comes from the dev extra)
+pip install -e ".[dev]"
 python -m pytest -q tests/
 
 # Frontend hot-reload (no rebuild needed, but bypasses serve's cache layer)
 cd frontend && npm run dev
 ```
+
+Most of the suite runs against a real MAY world rather than a fixture, and the
+path to it is currently hardcoded at the top of `tests/test_prep.py` and
+`tests/test_scale_generator.py`. Without that file those modules skip themselves,
+so a green run on a fresh clone may mean very little was actually exercised —
+check the skip count, and point `SOURCE` at a world of your own.
 
 The frontend is a build artifact: `mayviewer serve` ships the compiled bundle from
 `mayviewer/web/dist`, so edits under `frontend/src/` only appear after
