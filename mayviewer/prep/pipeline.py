@@ -87,7 +87,7 @@ def prep(source: str | Path, force: bool = False,
            if transit_geometry else None)
 
     if manifest_path.exists() and not force:
-        existing = json.loads(manifest_path.read_text())
+        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
         src = existing.get("source", {})
         if (existing.get("manifest_version") == MANIFEST_VERSION
                 and src.get("fingerprint") == _fingerprint(source)
@@ -266,6 +266,7 @@ def prep(source: str | Path, force: bool = False,
         "peak_unit_rows": peak,
         "build_seconds": round(time.time() - t0, 1),
     }
-    manifest_path.write_text(json.dumps(manifest, indent=1, default=int))
+    manifest_path.write_text(json.dumps(manifest, indent=1, default=int),
+                             encoding="utf-8")
     logger.info("Wrote cache %s (%.1fs)", out, manifest["build_seconds"])
     return manifest

@@ -117,6 +117,10 @@ that tells `prep` how to join each file to the world's geo codes:
 - `prop` is the feature property holding the join key (e.g. `LAD21NM`, `OA21CD`).
 - `strategy: "code"` matches the geo code exactly (casefold); `"name"` is loose,
   punctuation-insensitive. Omitted levels simply get no polygons.
+- The config and any GeoJSON are read as UTF-8. A shapefile's attribute table
+  has no encoding in band, so its `.cpg` sidecar is used when present and
+  otherwise UTF-8 then latin-1 is tried — accented place names (`A Coruña`,
+  `Alcalá`) survive either way, including on a non-UTF-8 Windows locale.
 
 Sanity-check join rates before a full build, then bake them in:
 
@@ -147,6 +151,9 @@ mayviewer prep /path/to/world_state.h5 \
   each stop. In the MAY repo: `data/geography/coord_mgu.csv`.
 - The flags must be given together; changing either CSV triggers a rebuild
   automatically. Worlds with no train/tube venues skip the layer with a warning.
+- Both CSVs are read as UTF-8, so accented station names come through as-is; the
+  BOM Excel adds when saving as "CSV UTF-8" is stripped rather than swallowing
+  the `line_id` column.
 - Buses are excluded by design: `bus_pool_*` venues are a single pooled hop with
   no route geometry.
 

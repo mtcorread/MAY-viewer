@@ -62,6 +62,13 @@ _MM_CHUNK = 1_000_000
 
 _MM_GROUP = "activity_mappings/membership_metadata"
 
+# The two CSVs are user-supplied and carry station names, so their encoding is
+# stated rather than inherited from the locale — cp1252 on a Spanish Windows
+# would mangle "Málaga" and raise on "Á". The -sig variant also strips the BOM
+# Excel writes when saving as "CSV UTF-8", which would otherwise turn the first
+# column header into "﻿line_id" and lose it.
+_CSV_ENCODING = "utf-8-sig"
+
 
 def _dec(v) -> str:
     return v.decode() if isinstance(v, (bytes, bytearray)) else str(v)
@@ -73,7 +80,7 @@ def _dec(v) -> str:
 def _load_mgu_xy(coord_mgu_csv: str) -> dict[str, tuple[float, float]]:
     """MGU code -> (lon, lat) centroid, full national coverage."""
     mgu_xy: dict[str, tuple[float, float]] = {}
-    with open(coord_mgu_csv, newline="") as fh:
+    with open(coord_mgu_csv, newline="", encoding=_CSV_ENCODING) as fh:
         for row in csv.DictReader(fh):
             mgu_xy[row["MGU"]] = (float(row["longitude"]), float(row["latitude"]))
     return mgu_xy
@@ -88,7 +95,7 @@ def build_geometry(line_stops_csv: str, coord_mgu_csv: str,
     """
     mgu_xy = _load_mgu_xy(coord_mgu_csv)
     raw: dict[str, list[tuple[int, str, str]]] = defaultdict(list)
-    with open(line_stops_csv, newline="") as fh:
+    with open(line_stops_csv, newline="", encoding=_CSV_ENCODING) as fh:
         for row in csv.DictReader(fh):
             lid = row["line_id"]
             if keep is not None and lid not in keep:
@@ -473,9 +480,9 @@ def main() -> None:
 
     geojson_path = os.path.join(args.out_dir, "transit_lines.geojson")
     sample_path = os.path.join(args.out_dir, "transit_sample.json")
-    with open(geojson_path, "w") as fh:
+    with open(geojson_path, "w", encoding="utf-8") as fh:
         json.dump(geojson, fh)
-    with open(sample_path, "w") as fh:
+    with open(sample_path, "w", encoding="utf-8") as fh:
         json.dump(sample, fh, indent=2)
 
     print("=== Transit join summary ===")

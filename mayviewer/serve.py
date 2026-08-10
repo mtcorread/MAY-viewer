@@ -527,7 +527,8 @@ def serve(
     # which reads per-unit drill-down from the source .h5 on demand.
     inspector = None
     try:
-        manifest = json.loads((cache / "manifest.json").read_text())
+        manifest = json.loads(
+            (cache / "manifest.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         manifest = {}
     if manifest.get("drilldown_lazy"):
