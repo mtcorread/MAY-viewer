@@ -18,6 +18,7 @@ Geometry parsing (for the actual PMTiles bake) is lazy and lives in
 
 from __future__ import annotations
 
+import codecs
 import json
 import logging
 import re
@@ -30,6 +31,100 @@ import numpy as np
 from .reader import WorldReader
 
 logger = logging.getLogger("mayviewer.prep.boundaries")
+
+
+# ── encoding of user-supplied files ──────────────────────────────────────
+# Boundary files come from national portals, not from us, so their encoding is
+# never ours to assume. Every read below names one explicitly: inheriting the
+# locale default means the same file parses on a UTF-8 machine and fails on a
+# Windows one, where cp1252 turns "Málaga" into "MÃ¡laga" and raises outright
+# on "Á" (its UTF-8 second byte, 0x81, is undefined in cp1252).
+#
+# JSON is the easy case: RFC 8259 mandates UTF-8. A shapefile's .dbf is the
+# hard one — it carries no encoding in band. Modern exports ship a .cpg sidecar
+# naming it; older Spanish and Latin-American ones are latin-1 with no sidecar
+# at all, so we probe rather than trust a single guess.
+
+_DBF_CANDIDATES = ("utf-8", "cp1252", "latin-1")
+_DBF_PROBE_RECORDS = 200
+
+
+def _cpg_encoding(p: Path) -> str | None:
+    """The encoding named by a shapefile's .cpg sidecar, if it has a usable one."""
+    cpg = p.with_suffix(".cpg")
+    if not cpg.exists():
+        return None
+    try:
+        name = cpg.read_text(encoding="ascii", errors="ignore").strip()
+    except OSError:
+        return None
+    if not name:
+        return None
+    try:
+        codecs.lookup(name)
+    except LookupError:
+        logger.warning("%s names an unknown encoding %r — probing instead",
+                       cpg.name, name)
+        return None
+    return name
+
+
+def open_shapefile(p: Path):
+    """``shapefile.Reader`` for ``p`` with its .dbf encoding resolved.
+
+    Tries the .cpg sidecar's encoding first when there is one, then UTF-8, then
+    the 8-bit fallbacks, keeping the first that decodes a bounded sample of
+    field names and records. Sidecars are advisory rather than authoritative: a
+    mislabelled one is common enough that it should not fail a build when the
+    file plainly reads as something else.
+
+    The sample is needed because pyshp decodes lazily — without it a wrong
+    guess surfaces partway through a long build instead of here.
+    """
+    import shapefile  # pyshp
+
+    declared = _cpg_encoding(p)
+    # dict.fromkeys: declared first, no duplicate if it repeats a fallback.
+    candidates = tuple(dict.fromkeys(
+        ((declared,) if declared else ()) + _DBF_CANDIDATES))
+    # pyshp 2.x raises the UnicodeDecodeError straight through; 3.x wraps it in
+    # a dbfFileException, so both have to be caught for the probe to see it.
+    # Field names decode when the Reader is built, records only when read, so
+    # both steps sit inside the probe. Deliberately *not* the ShapefileException
+    # base class: a truncated or corrupt file is not an encoding problem, and
+    # retrying it under four encodings would only bury pyshp's own diagnosis.
+    decode_failed = (UnicodeDecodeError,
+                     getattr(shapefile, "dbfFileException",
+                             shapefile.ShapefileException))
+    last_error: Exception | None = None
+    for enc in candidates:
+        sf = None
+        try:
+            sf = shapefile.Reader(str(p), encoding=enc)
+            for i, _rec in enumerate(sf.iterRecords()):
+                if i >= _DBF_PROBE_RECORDS:
+                    break
+        except decode_failed as e:
+            last_error = e
+            if sf is not None:
+                sf.close()
+            continue
+        if enc != "utf-8":
+            source = "from .cpg" if enc == declared else "detected"
+            logger.info("%s: reading attributes as %s (%s)", p.name, enc, source)
+        if declared and enc != declared:
+            logger.warning("%s says the attribute table is %s, but it does not "
+                           "read as that — using %s instead",
+                           p.with_suffix(".cpg").name, declared, enc)
+        return sf
+    # Every 8-bit fallback maps every byte, so reaching here means the file is
+    # unreadable for some reason other than its encoding. Say what was tried
+    # rather than blaming the encoding outright.
+    raise SystemExit(
+        f"Could not read the attribute table of {p.name}.\n"
+        f"  Tried: {', '.join(candidates)}\n"
+        f"  Last error: {last_error}"
+    )
 
 
 # ── normalisation ────────────────────────────────────────────────────────
@@ -99,7 +194,7 @@ def load_feature_props(path: str | Path) -> Features:
     p = Path(path)
     suf = p.suffix.lower()
     if suf in (".geojson", ".json"):
-        obj = json.loads(p.read_text())
+        obj = json.loads(p.read_text(encoding="utf-8"))
         feats = obj.get("features", []) if isinstance(obj, dict) else []
         if obj.get("type") == "Topology":
             raise SystemExit(
@@ -122,7 +217,7 @@ def load_feature_props(path: str | Path) -> Features:
             import shapefile  # pyshp
         except ImportError:
             raise SystemExit("Reading .shp needs pyshp:  pip install -e \".[geo]\"")
-        sf = shapefile.Reader(str(p))
+        sf = open_shapefile(p)
         fields = [f[0] for f in sf.fields[1:]]  # drop DeletionFlag
         props = {k: [] for k in fields}
         n = 0
@@ -254,7 +349,10 @@ def read_geojson_crs(path: str | Path) -> str | None:
     p = Path(path)
     if p.suffix.lower() not in (".geojson", ".json"):
         prj = p.with_suffix(".prj")          # shapefile sidecar
-        return prj.read_text().strip() if prj.exists() else None
+        # WKT is ASCII in practice; an accented datum name is not worth failing
+        # the whole read over, since only the CRS name is pulled back out.
+        return (prj.read_text(encoding="utf-8", errors="replace").strip()
+                if prj.exists() else None)
     with open(p, "r", encoding="utf-8") as fh:
         head = fh.read(8192)
     m = re.search(r'"crs"\s*:\s*\{.*?"name"\s*:\s*"([^"]+)"', head, re.S)
@@ -266,9 +364,11 @@ def load_boundary_config(path: str | Path) -> dict[str, LevelBoundaryCfg]:
     file's directory so a config + its shapes are a portable bundle."""
     p = Path(path).resolve()
     try:
-        obj = json.loads(p.read_text())
+        obj = json.loads(p.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         raise SystemExit(f"Boundary config is not valid JSON: {p}\n  {e}")
+    except UnicodeDecodeError as e:
+        raise SystemExit(f"Boundary config is not UTF-8: {p}\n  {e}")
     levels = obj.get("levels")
     if not isinstance(levels, dict) or not levels:
         raise SystemExit(
@@ -376,7 +476,7 @@ def iter_features(
             import shapefile  # pyshp
         except ImportError:
             raise SystemExit('Reading .shp needs pyshp:  pip install -e ".[geo]"')
-        sf = shapefile.Reader(str(p))
+        sf = open_shapefile(p)
         for sr in sf.iterShapeRecords():
             raw = sr.record[prop] if prop in sr.record.as_dict() else None
             if raw is None:
